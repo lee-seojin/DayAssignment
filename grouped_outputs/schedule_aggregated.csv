@@ -1,0 +1,10 @@
+﻿dowcd,frequency,count,pct_of_total,output_file
+4,1,334,13.175542406311639,dowcd_4__freq_1.csv
+O,1,189,7.455621301775148,dowcd_O__freq_1.csv
+O,2,1,0.03944773175542406,dowcd_O__freq_2.csv
+E,1,98,3.8658777120315584,dowcd_E__freq_1.csv
+A,1,1120,44.18145956607495,dowcd_A__freq_1.csv
+A,2,402,15.857988165680473,dowcd_A__freq_2.csv
+A,3,243,9.585798816568047,dowcd_A__freq_3.csv
+A,4,51,2.0118343195266273,dowcd_A__freq_4.csv
+A,5,97,3.8264299802761337,dowcd_A__freq_5.csv

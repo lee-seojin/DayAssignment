@@ -1,0 +1,2 @@
+﻿custno,xcoord,ycoord,edgeid,qty,volume,weight,sos,frequency,BEF_MON,BEF_TUE,BEF_WED,BEF_THU,BEF_FRI,BEF_SAT,BEF_SUN,dowcd,dowlockcd,wccd_flag,material_typ,clusterid,dataset_id
+4506587,-86.03734,39.919303,1279101432,1,10.0,530.0,1,2,0,1,0,0,1,0,0,O,0,0,1,0,1042199
