@@ -1,5 +1,7 @@
 from data_type import SchedTuple, DAYS_5, ALL_DAYS_7, WEEKS, Stop
 from typing import Dict, Tuple
+import math
+
 
 def a(schedule: SchedTuple, l: int, d: str) -> int:
     """schedule이 (week=l, day=d)에 방문하면 1 else 0"""
@@ -22,33 +24,58 @@ def compute_V(stops: Dict[int, Stop], p: Dict[int, SchedTuple]) -> Dict[Tuple[in
     return V
 
 
-def manhattan(stop_i: Stop, stop_j: Stop) -> float:
-    return abs(float(stop_i.xcoord) - float(stop_j.xcoord)) + abs(float(stop_i.ycoord) - float(stop_j.ycoord))  # type: ignore
+EARTH_R_M = 6371000.0  # meters
 
+def manhattan(stop_i: Stop, stop_j: Stop) -> float:
+    # lat/lon in degrees -> Manhattan distance in meters.
+    lon1 = float(stop_i.xcoord)
+    lat1 = float(stop_i.ycoord)
+    lon2 = float(stop_j.xcoord)
+    lat2 = float(stop_j.ycoord)
+
+    # degrees -> radians
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    lam1 = math.radians(lon1)
+    lam2 = math.radians(lon2)
+
+    dphi = abs(phi2 - phi1)
+    dlam = abs(lam2 - lam1)
+
+    # north-south component
+    d_lat = EARTH_R_M * dphi
+
+    # east-west component (scaled by cos(mean latitude))
+    phi_m = 0.5 * (phi1 + phi2)
+    d_lon = EARTH_R_M * math.cos(phi_m) * dlam
+
+    return d_lat + d_lon
+
+OD_CM_TO_M = 0.01
 
 def get_dist(
-    i: int,
-    j: int,
-    Ddist: Dict[Tuple[int, int], float],
-    stops: Dict[int, Stop],
+        i: int,
+        j: int,
+        Ddist: Dict[Tuple[int, int], float],
+        stops: Dict[int, Stop],
 ) -> float:
-    """
-    OD가 있으면 사용, 없으면 Manhattan fallback
-    """
+    # OD가 있으면 사용, 없으면 Manhattan fallback -> 단위는 meter
+
     if (i, j) in Ddist:
-        return float(Ddist[(i, j)])
+        return float(Ddist[(i, j)]) * OD_CM_TO_M
+
     return manhattan(stops[i], stops[j])
 
-def try_apply_change(
-    stop_id: int,
-    new_sched: SchedTuple,
-    p: Dict[int, SchedTuple],
-    baseline_sched: Dict[int, SchedTuple],
-    changed: Dict[int, int],
-    C_used: int,
-    C_max: int,
-) -> Tuple[bool, int]:
 
+def try_apply_change(
+        stop_id: int,
+        new_sched: SchedTuple,
+        p: Dict[int, SchedTuple],
+        baseline_sched: Dict[int, SchedTuple],
+        changed: Dict[int, int],
+        C_used: int,
+        C_max: int,
+) -> Tuple[bool, int]:
     before = changed[stop_id]
     after = 1 if new_sched != baseline_sched[stop_id] else 0
     new_C_used = C_used - before + after

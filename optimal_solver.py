@@ -7,6 +7,12 @@ import itertools
 import pandas as pd
 import gurobipy as gp
 from gurobipy import GRB
+import math
+
+from helper_funcs import get_dist, OD_CM_TO_M, EARTH_R_M
+
+DATA_SET = "1027633"
+RUN_TIME = 3600
 
 # Constants (days)
 DAYS = ["MON", "TUE", "WED", "THU", "FRI"]
@@ -142,8 +148,9 @@ def week_options_from_dowcd(dowcd: str, pools: Pools) -> List[WeekTuple]:
 
 # Build Stop objects + feasible schedules (tuple-pool shared)
 def daybits_from_bef_row(r: pd.Series, pools: Pools) -> DayBits:
-    bits: DayBits = tuple(int(r[f"BEF_{d}"]) for d in DAYS)  # type: ignore
-    return pools.day(bits)
+    bits5 = [int(r[f"BEF_{d}"]) for d in DAYS]   # MON..FRI
+    bits7: DayBits = tuple(bits5 + [0, 0])       # SAT,SUN = 0
+    return pools.day(bits7)
 
 
 def day_options_for_stop(freq: int, baseline_bits: DayBits, darules_map: Dict[int, List[DayBits]]) -> List[DayBits]:
@@ -242,8 +249,9 @@ def load_od_matrix(
                 try:
                     origin = int(parts[-4])
                     dest = int(parts[-3])
-                    dist = float(parts[-2])
-                    time = float(parts[-1])
+                    time = float(parts[-2])
+                    dist = float(parts[-1])
+
                 except ValueError:
                     continue
 
@@ -263,23 +271,15 @@ def compute_k_nearest_d(ids: Iterable[int], Ddist: Dict[Tuple[int, int], float],
         stop_i = stops[i]
         cand: List[float] = []
         for j in ids_list:
-            if j == i: continue
-            if (i, j) in Ddist:
-                cand.append(Ddist[(i, j)])
-            else:
-                cand.append(compute_manhattan_dist(stop_i, stops[j]))
+            if j == i:
+                continue
+            cand.append(get_dist(i, j, Ddist, stops))
 
         cand.sort()
         k_nearest_d[i] = cand[min(k - 1, len(cand) - 1)]  # k=1: 최소값
 
     return k_nearest_d
 
-def compute_manhattan_dist(stop_i: Stop, stop_j: Stop) -> float:
-    i_x, i_y = stop_i.xcoord, stop_i.ycoord
-    j_x, j_y = stop_j.xcoord, stop_j.ycoord
-    dist = abs(i_x - j_x) + abs(i_y - j_y)
-
-    return dist
 
 def solve_formulation(
     stops: Dict[int, Stop],
@@ -299,8 +299,19 @@ def solve_formulation(
     WEEKS = list(range(1, timecycle + 1))
     ids = list(stops.keys())
 
+    print("[DEBUG] raw max OD (cm):", max(Ddist.values()) if Ddist else None)
+    print("[DEBUG] raw max OD (m):", (max(Ddist.values()) * 0.01) if Ddist else None)
+
     # Big-M
-    M = max(Ddist.values())
+    max_od_m = max(Ddist.values()) * OD_CM_TO_M if Ddist else 0.0
+
+    # Manhattan upper bound (meters) based on lat/lon bounding box (safe upper bound)
+    lons = [float(stops[i].xcoord) for i in ids]
+    lats = [float(stops[i].ycoord) for i in ids]
+    max_manh_m = (abs(max(lats) - min(lats)) + abs(max(lons) - min(lons))) * (math.pi / 180.0) * EARTH_R_M
+
+    M = max(max_od_m, max_manh_m)
+    print("[DEBUG] M chosen (m):", M, " (max_od_m:", max_od_m, " max_manh_m:", max_manh_m, ")")
 
     # a[p,l,d] based on schedule tuple
     def a(p: SchedTuple, l: int, d: str) -> int:
@@ -388,10 +399,11 @@ def solve_formulation(
                 for j in ids:
                     if j == i:
                         continue
-                    if (i, j) not in Ddist:
-                        continue
+
+                    dij = get_dist(i, j, Ddist, stops)  # <-- 핵심 (항상 meter)
+
                     m.addConstr(
-                        z[(i, l, d)] >= Ddist[(i, j)] - M * (2 - y[(i, l, d)] - y[(j, l, d)]),
+                        z[(i, l, d)] >= dij - M * (2 - y[(i, l, d)] - y[(j, l, d)]),
                         name=f"zlb_{i}_{j}_{l}_{d}"
                     )
 
@@ -437,8 +449,6 @@ def solve_formulation(
 # Main
 def main():
 
-    DATA_SET = "1042199"
-
     PARAMS_PATH = Path(f"{DATA_SET}/params.txt")
 
     params = load_params(PARAMS_PATH)
@@ -468,7 +478,7 @@ def main():
     # 5) solve (new objective formulation)
     model, chosen_tuple, changed = solve_formulation(stops=stops, pi=Pi, baseline_sched=baseline_sched,
                                                      timecycle=timecycle, v_max=V_MAX, g_max=G_MAX, c_max=C_MAX,
-                                                     Ddist=Ddist, w1=1.0, w2=1.0, time_limit=600, mip_gap=0.0)
+                                                     Ddist=Ddist, w1=1.0, w2=1.0, time_limit=RUN_TIME, mip_gap=0.0)
 
     # 6) write chosen schedules back to Stop class (final layer = class)
     for s in stops.values():
