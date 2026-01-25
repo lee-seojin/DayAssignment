@@ -436,7 +436,10 @@ def solve_formulation(
 
 # Main
 def main():
-    PARAMS_PATH = Path("1027633/params.txt")
+
+    DATA_SET = "1042199"
+
+    PARAMS_PATH = Path(f"{DATA_SET}/params.txt")
 
     params = load_params(PARAMS_PATH)
     timecycle = params["timecycle"]
@@ -445,12 +448,12 @@ def main():
     max_pct = params["MAX_PCT_DAY_CHANGES"]
 
     # 1) aggregate raw stops -> stop-level with BEF_* + frequency
-    aggr = pd.read_csv("1027633/1027633_stops_aggregated.csv")
+    aggr = pd.read_csv(f"{DATA_SET}/{DATA_SET}_stops_aggregated.csv")
 
     pools = Pools()
 
     # 2) read darules (freq -> pooled daybits)
-    darules_path = Path("1027633/darules.txt")
+    darules_path = Path(f"{DATA_SET}/darules.txt")
     darules_map = load_darules(darules_path, pools)
 
     # 3) build Stop objects + Pi (tuple schedules) + baseline schedule tuple
@@ -465,7 +468,7 @@ def main():
     # 5) solve (new objective formulation)
     model, chosen_tuple, changed = solve_formulation(stops=stops, pi=Pi, baseline_sched=baseline_sched,
                                                      timecycle=timecycle, v_max=V_MAX, g_max=G_MAX, c_max=C_MAX,
-                                                     Ddist=Ddist, w1=1.0, w2=1.0, time_limit=3600, mip_gap=0.0)
+                                                     Ddist=Ddist, w1=1.0, w2=1.0, time_limit=600, mip_gap=0.0)
 
     # 6) write chosen schedules back to Stop class (final layer = class)
     for s in stops.values():
