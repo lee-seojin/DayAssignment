@@ -11,8 +11,8 @@ import math
 
 from helper_funcs import get_dist, OD_CM_TO_M, EARTH_R_M
 
-DATA_SET = "1027633"
-RUN_TIME = 3600
+DATA_SET = "1042199"
+RUN_TIME = 600
 
 # Constants (days)
 DAYS = ["MON", "TUE", "WED", "THU", "FRI"]
