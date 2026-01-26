@@ -70,7 +70,7 @@ class TuplePools:
 
     def week(self, weeks: Iterable[int]) -> WeekTuple:
         t = tuple(sorted(tuple(weeks)))
-        self._week_pool.Ssetdefault(t, t)
+        self._week_pool.setdefault(t, t)
         # 해당 week pattern을 본 적 있으면 불러오고, 없다면 t 값을 등록한 뒤에 가져와라
         return self._week_pool[t]
 
