@@ -1,7 +1,7 @@
 from data_type import SchedTuple, DAYS_5, ALL_DAYS_7, WEEKS, Stop
 from typing import Dict, Tuple
 import math
-
+from datetime import datetime
 
 def a(schedule: SchedTuple, l: int, d: str) -> int:
     """schedule이 (week=l, day=d)에 방문하면 1 else 0"""
@@ -86,3 +86,9 @@ def try_apply_change(
     p[stop_id] = new_sched
     changed[stop_id] = after
     return True, new_C_used
+
+def make_run_prefix(dataset: str) -> str:
+    now = datetime.now()
+    date_str = now.strftime("%Y%m%d")   # 20260127
+    time_str = now.strftime("%H%M%S")   # 153012
+    return f"{dataset}_{date_str}_{time_str}"

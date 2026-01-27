@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Iterable
 import itertools
@@ -8,11 +7,16 @@ import pandas as pd
 import gurobipy as gp
 from gurobipy import GRB
 import math
+import csv
+from datetime import datetime
 
-from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M
+from dataclasses import dataclass
+from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M, make_run_prefix
 
 DATA_SET = "1042199"
-RUN_TIME = 3600
+W1, W2 = 1.0, 1.0
+K_NEIGH = 10
+RUN_TIME = 60
 
 # Constants (days)
 DAYS = ["MON", "TUE", "WED", "THU", "FRI"]
@@ -296,11 +300,12 @@ def solve_formulation(
     w2: float = 1.0,
     time_limit: Optional[int] = 600,
     mip_gap: Optional[float] = 0.0,
+    k_neigh: int = 10,
 ):
 
     WEEKS_local = list(range(1, timecycle + 1))
     ids = list(stops.keys())
-    neigh = build_k_neighborhood(ids=ids, Ddist=Ddist, stops=stops)
+    neigh = build_k_neighborhood(ids=ids, Ddist=Ddist, stops=stops, k=k_neigh)
 
     max_od_m = max(Ddist.values()) * OD_CM_TO_M if Ddist else 0.0
     lons = [float(stops[i].xcoord) for i in ids]
@@ -350,7 +355,6 @@ def solve_formulation(
                     v[(i, j, l, d)] = m.addVar(vtype=GRB.BINARY, name=f"v_{i}_{j}_{l}_{d}")
 
     m.update()
-    print("[DEBUG] |v| =", len(v))  # memory risk quick check
 
     # Objective
     m.setObjective(
@@ -451,7 +455,6 @@ def solve_formulation(
 
 # Main
 def main():
-
     PARAMS_PATH = Path(f"{DATA_SET}/params.txt")
 
     params = load_params(PARAMS_PATH)
@@ -481,7 +484,7 @@ def main():
     # 5) solve (new objective formulation)
     model, chosen_tuple, changed = solve_formulation(stops=stops, pi=Pi, baseline_sched=baseline_sched,
                                                      timecycle=timecycle, v_max=V_MAX, g_max=G_MAX, c_max=C_MAX,
-                                                     Ddist=Ddist, w1=1.0, w2=1.0, time_limit=RUN_TIME, mip_gap=0.0)
+                                                     Ddist=Ddist, w1=W1, w2=W2, time_limit=RUN_TIME, mip_gap=0.0, k_neigh= K_NEIGH)
 
     # 6) write chosen schedules back to Stop class (final layer = class)
     for s in stops.values():
@@ -508,10 +511,66 @@ def main():
             **{f"AFT_{d}": int(s.chosen.day_bits[DAYS.index(d)]) for d in DAYS},
         })
 
-    out = pd.DataFrame(rows)
-    out.to_csv("resultdetail_gurobi_tuplepool.csv", index=False, encoding="utf-8-sig")
-    print("Saved: resultdetail_gurobi_tuplepool.csv")
+    run_prefix = make_run_prefix(DATA_SET)
 
+    out_dir = Path("results_optimal")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{run_prefix}_optimal_resultdetail.csv"
+
+    opt_status = model.Status
+    is_opt = (opt_status == GRB.OPTIMAL)
+
+    # incumbent objective는 TIME_LIMIT인데 feasible 해가 없으면 접근 에러날 수 있어서 안전 처리
+    opt_obj = None
+    opt_bound = None
+    opt_gap = None
+    try:
+        opt_obj = float(model.ObjVal)
+        opt_bound = float(model.ObjBound)
+        opt_gap = float(model.MIPGap) * 100.0
+    except:
+        opt_obj, opt_bound, opt_gap = None, None, None
+
+    meta_header = [
+        "Date",
+        "Data set",
+        "Optimal Solver",
+        "Objective (Best incumbent)",
+        "Best Bound",
+        "Gap(%)",
+        "Optimal 여부",
+        "TimeLimit(s)",
+        "k",
+        "w1",
+        "w2",
+    ]
+
+    meta_values = [
+        datetime.now().strftime("%y/%m/%d"),
+        DATA_SET,
+        "Gurobi",
+        opt_obj,
+        opt_bound,
+        opt_gap,
+        ("O" if is_opt else "X"),
+        RUN_TIME,
+        K_NEIGH,  # 네 코드에서 k 쓰고 있으면 그 변수명으로 맞추기 (없으면 비워도 됨)
+        W1,
+        W2,
+    ]
+
+    # write: 2 meta rows + blank row + stop table =
+    with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(meta_header)
+        w.writerow(meta_values)
+        w.writerow([])  # 빈 줄(선택)
+
+    # stop table은 append로 붙이기
+    out = pd.DataFrame(rows)
+    out.to_csv(out_path, mode="a", index=False, encoding="utf-8-sig")
+
+    print(f"Saved: {out_path}")
 
 if __name__ == "__main__":
     main()

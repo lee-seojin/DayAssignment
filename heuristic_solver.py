@@ -5,12 +5,14 @@ from typing import Dict, Tuple
 import csv
 import time
 
-from helper_funcs import compute_V
+from helper_funcs import compute_V, make_run_prefix
 from heuristic_aggr import load_artifacts, DATA_SET
 from heuristic_phase1 import phase_1
 from heuristic_phase2 import phase_2
 from data_type import Stop, SchedTuple
 from heuristic_objective import compute_objective
+
+W1, W2 = 1.0, 1.0
 
 def _daybits_to_str(daybits: Tuple[int, ...]) -> str:
     # (mon,tue,wed,thu,fri,sat,sun) -> "1100100"
@@ -22,13 +24,40 @@ def _weektuple_to_str(weekt: Tuple[int, ...]) -> str:
     return ",".join(str(int(x)) for x in weekt)
 
 
-def save_stops_result_csv(out_path: Path,
-                          stops: Dict[int, Stop],
-                          p: Dict[int, SchedTuple],
-                          baseline_sched: Dict[int, SchedTuple],
-                          changed: Dict[int, int]) -> None:
+import time
+import csv
+from datetime import datetime
+
+def save_heuristic_onefile_csv(
+    out_path: Path,
+    *,
+    meta: Dict[str, object],          # 초록 영역 1줄짜리 값들
+    stops: Dict[int, Stop],
+    p: Dict[int, SchedTuple],
+    baseline_sched: Dict[int, SchedTuple],
+    changed: Dict[int, int],
+) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # ===== green header (초록 영역) =====
+    meta_header = [
+        "Date",
+        "Data set",
+        "Objective",
+        "Execution Time(s)",
+        "w1",
+        "w2",
+    ]
+    meta_values = [
+        meta["date"],
+        meta["dataset"],
+        meta["objective"],
+        meta["exec_time_s"],
+        meta["w1"],
+        meta["w2"],
+    ]
+
+    # ===== stop table header =====
     fieldnames = [
         "stop_id",
         "xcoord", "ycoord",
@@ -38,18 +67,22 @@ def save_stops_result_csv(out_path: Path,
         "changed",
     ]
 
-    with out_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
+    with out_path.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(meta_header)
+        w.writerow(meta_values)
+        w.writerow([])  # 빈 줄(선택)
+
+        dw = csv.DictWriter(f, fieldnames=fieldnames)
+        dw.writeheader()
 
         for stop_id, s in stops.items():
             base = baseline_sched[stop_id]
             chosen = p[stop_id]
-
             base_w, base_d = base
             ch_w, ch_d = chosen
 
-            w.writerow({
+            dw.writerow({
                 "stop_id": stop_id,
                 "xcoord": float(s.xcoord),
                 "ycoord": float(s.ycoord),
@@ -63,20 +96,6 @@ def save_stops_result_csv(out_path: Path,
                 "changed": int(changed.get(stop_id, 0)),
             })
 
-
-def save_objective_csv(out_path: Path,
-                       obj_dict: Dict[str, float],
-                       w1: float,
-                       w2: float) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["data_set", DATA_SET])
-        w.writerow(["w1", w1])
-        w.writerow(["w2", w2])
-        w.writerow(["density_term", obj_dict["density"]])
-        w.writerow(["volume_balance_term", obj_dict["vol_balance"]])
-        w.writerow(["objective", obj_dict["obj"]])
 
 
 def main():
@@ -102,19 +121,36 @@ def main():
     clusters, nucleus, p, changed, C_used = phase_1(artifacts, p, changed, C_used)
     p, changed, C_used = phase_2(artifacts, p, changed, C_used, clusters, nucleus)
 
-    obj = compute_objective(artifacts, p, w1=1.0, w2=1.0)
+    obj = compute_objective(artifacts, p, w1=W1, w2=W2)
     print(f"[OBJ] total={obj['obj']:.6f}")
-
-    out_dir = Path("results_heuristic")
-    save_stops_result_csv(out_dir / f"{DATA_SET}_result_stops.csv", stops, p, baseline_sched, changed)
-    save_objective_csv(out_dir / f"{DATA_SET}_result_objective.csv", obj, w1=1.0, w2=1.0)
-
-    print(f"{DATA_SET} Saved results to: {out_dir.resolve()}")
 
     end_time = time.perf_counter()
     elapsed = end_time - start_time
+    print(f"[Total Execution Time] ={elapsed:.3f}s")
 
-    print(f"[TIME] Total execution time: {elapsed:.2f} seconds")
+    run_prefix = make_run_prefix(DATA_SET)
+    out_path = Path("results_heuristic") / f"{run_prefix}_heuristic_resultdetail.csv"
+
+    meta = {
+        "date": datetime.now().strftime("%y/%m/%d"),
+        "dataset": DATA_SET,
+        "solver_name": "Heuristic",
+        "objective": float(obj["obj"]),
+        "exec_time_s": float(elapsed),
+        "w1": W1,
+        "w2": W2,
+    }
+
+    save_heuristic_onefile_csv(
+        out_path,
+        meta=meta,
+        stops=stops,
+        p=p,
+        baseline_sched=baseline_sched,
+        changed=changed,
+    )
+
+    print(f"{DATA_SET} Saved")
 
 if __name__ == "__main__":
     main()

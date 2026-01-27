@@ -47,7 +47,7 @@ def density_term_w(stops: Dict[int, Stop],
                 if a(sched, l, d) == 1:
                     visited_by_cell[(l, d)].append(stop_id)
 
-    # 2) 각 cell에서 i별 max distance 합산
+    # 2) 각 cell에서 i별 min distance 합산
     for (l, d), ids in visited_by_cell.items():
         if len(ids) <= 1:
             continue
