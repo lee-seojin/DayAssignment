@@ -52,14 +52,14 @@ def density_term_w(stops: Dict[int, Stop],
         if len(ids) <= 1:
             continue
 
-        # i마다 max_j dist(i,j)
+        # i마다 min_j dist(i,j)
         for i in ids:
             best = 0.0
             for j in ids:
                 if j == i:
                     continue
                 dij = get_dist(i, j, Ddist, stops)  # OD 없으면 Manhattan fallback 포함되어 있어야 함
-                if dij > best:
+                if dij < best:
                     best = dij
             total += best
 
