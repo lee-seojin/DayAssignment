@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Tuple
 import csv
+import time
 
 from helper_funcs import compute_V
 from heuristic_aggr import load_artifacts, DATA_SET
@@ -79,6 +80,8 @@ def save_objective_csv(out_path: Path,
 
 
 def main():
+    start_time = time.perf_counter()
+
     ARTIFACTS_PATH = Path("baseline_data_store/artifacts.pkl")
     artifacts = load_artifacts(ARTIFACTS_PATH)
 
@@ -107,6 +110,11 @@ def main():
     save_objective_csv(out_dir / f"{DATA_SET}_result_objective.csv", obj, w1=1.0, w2=1.0)
 
     print(f"{DATA_SET} Saved results to: {out_dir.resolve()}")
+
+    end_time = time.perf_counter()
+    elapsed = end_time - start_time
+
+    print(f"[TIME] Total execution time: {elapsed:.2f} seconds")
 
 if __name__ == "__main__":
     main()

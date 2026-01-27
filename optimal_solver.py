@@ -9,10 +9,10 @@ import gurobipy as gp
 from gurobipy import GRB
 import math
 
-from helper_funcs import get_dist, OD_CM_TO_M, EARTH_R_M
+from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M
 
 DATA_SET = "1042199"
-RUN_TIME = 600
+RUN_TIME = 3600
 
 # Constants (days)
 DAYS = ["MON", "TUE", "WED", "THU", "FRI"]
@@ -262,23 +262,25 @@ def load_od_matrix(
 
     return od
 
-def compute_k_nearest_d(ids: Iterable[int], Ddist: Dict[Tuple[int, int], float], stops: Dict[int, Stop], k: int = 1,) -> Dict[int, float]:
+def build_k_neighborhood(
+    ids: List[int],
+    Ddist: Dict[Tuple[int, int], float],
+    stops: Dict[int, Stop],
+    k: int = 10,
+) -> Dict[int, List[int]]:
+    neigh = {}
 
-    ids_list = list(ids)
-    k_nearest_d: Dict[int, float] = {}
-
-    for i in ids_list:
-        stop_i = stops[i]
-        cand: List[float] = []
-        for j in ids_list:
-            if j == i:
+    for i in ids:
+        dists = []
+        for j in ids:
+            if i == j:
                 continue
-            cand.append(get_dist(i, j, Ddist, stops))
+            dists.append((get_dist(i, j, Ddist, stops), j))
+        dists.sort(key=lambda x: x[0])
 
-        cand.sort()
-        k_nearest_d[i] = cand[min(k - 1, len(cand) - 1)]  # k=1: 최소값
+        neigh[i] = [j for _, j in dists[:k]]
 
-    return k_nearest_d
+    return neigh
 
 
 def solve_formulation(
@@ -290,69 +292,70 @@ def solve_formulation(
     g_max: float,
     c_max: int,
     Ddist: Dict[Tuple[int, int], float],
-    w1: float = 1.0,                 # stop density weight (w term)
-    w2: float = 1.0,                  # volume balancing weight
+    w1: float = 1.0,
+    w2: float = 1.0,
     time_limit: Optional[int] = 600,
     mip_gap: Optional[float] = 0.0,
 ):
 
-    WEEKS = list(range(1, timecycle + 1))
+    WEEKS_local = list(range(1, timecycle + 1))
     ids = list(stops.keys())
+    neigh = build_k_neighborhood(ids=ids, Ddist=Ddist, stops=stops)
 
-    print("[DEBUG] raw max OD (cm):", max(Ddist.values()) if Ddist else None)
-    print("[DEBUG] raw max OD (m):", (max(Ddist.values()) * 0.01) if Ddist else None)
-
-    # Big-M
     max_od_m = max(Ddist.values()) * OD_CM_TO_M if Ddist else 0.0
-
-    # Manhattan upper bound (meters) based on lat/lon bounding box (safe upper bound)
     lons = [float(stops[i].xcoord) for i in ids]
     lats = [float(stops[i].ycoord) for i in ids]
     max_manh_m = (abs(max(lats) - min(lats)) + abs(max(lons) - min(lons))) * (math.pi / 180.0) * EARTH_R_M
 
     M = max(max_od_m, max_manh_m)
-    print("[DEBUG] M chosen (m):", M, " (max_od_m:", max_od_m, " max_manh_m:", max_manh_m, ")")
 
-    # a[p,l,d] based on schedule tuple
-    def a(p: SchedTuple, l: int, d: str) -> int:
-        week_t, day_b = p
-        return int((l in week_t) and (day_b[ALL_DAYS_7.index(d)] == 1))
-
-    m = gp.Model("DayAssign_DensityPlusVolumeBalance")
+    # Model
+    m = gp.Model("DayAssign_MinNearestPlusVolumeBalance_AllPairs")
     if time_limit is not None:
         m.setParam(GRB.Param.TimeLimit, time_limit)
     if mip_gap is not None:
         m.setParam(GRB.Param.MIPGap, mip_gap)
 
-    # Vars
+    # Variables
     x = {(i, p): m.addVar(vtype=GRB.BINARY, name=f"x_{i}_W{p[0]}_D{p[1]}")
          for i in ids for p in pi[i]}
 
     y = {(i, l, d): m.addVar(vtype=GRB.BINARY, name=f"y_{i}_{l}_{d}")
-         for i in ids for l in WEEKS for d in DAYS}
+         for i in ids for l in WEEKS_local for d in DAYS}
 
     c = {i: m.addVar(vtype=GRB.BINARY, name=f"c_{i}") for i in ids}
 
+    # z_{i,l,d}: min-nearest distance surrogate
     z = {(i, l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"z_{i}_{l}_{d}")
-         for i in ids for l in WEEKS for d in DAYS}
+         for i in ids for l in WEEKS_local for d in DAYS}
 
+    # w_{l,d} = sum_i z_{i,l,d}
     w = {(l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"w_{l}_{d}")
-         for l in WEEKS for d in DAYS}
+         for l in WEEKS_local for d in DAYS}
 
-    # day volume variable (per week/day)
+    # day volume
     Vday = {(l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vday_{l}_{d}")
-            for l in WEEKS for d in DAYS}
+            for l in WEEKS_local for d in DAYS}
 
-    # per-week max/min day volume for balancing
-    Vmax = {l: m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vmax_{l}") for l in WEEKS}
-    Vmin = {l: m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vmin_{l}") for l in WEEKS}
+    # volume balancing (weekly envelope)
+    Vmax = {l: m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vmax_{l}") for l in WEEKS_local}
+    Vmin = {l: m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vmin_{l}") for l in WEEKS_local}
+
+    # NEW binary v_{i,j,l,d}: j chosen as i's (selected) neighbor on (l,d)
+    v = {}
+    for l in WEEKS_local:
+        for d in DAYS:
+            for i in ids:
+                for j in neigh[i]:
+                    v[(i, j, l, d)] = m.addVar(vtype=GRB.BINARY, name=f"v_{i}_{j}_{l}_{d}")
 
     m.update()
+    print("[DEBUG] |v| =", len(v))  # memory risk quick check
 
     # Objective
     m.setObjective(
-        w1 * gp.quicksum(w[(l, d)] for l in WEEKS for d in DAYS)
-        + w2 * gp.quicksum(Vmax[l] - Vmin[l] for l in WEEKS),
+        w1 * gp.quicksum(w[(l, d)] for l in WEEKS_local for d in DAYS)
+        + w2 * gp.quicksum(Vmax[l] - Vmin[l] for l in WEEKS_local),
         GRB.MINIMIZE
     )
 
@@ -361,17 +364,17 @@ def solve_formulation(
     for i in ids:
         m.addConstr(gp.quicksum(x[(i, p)] for p in pi[i]) == 1, name=f"choose1_{i}")
 
-    # (2) y definition
+    # (2) y definition using helper_funcs.a()
     for i in ids:
-        for l in WEEKS:
+        for l in WEEKS_local:
             for d in DAYS:
                 m.addConstr(
                     y[(i, l, d)] == gp.quicksum(a(p, l, d) * x[(i, p)] for p in pi[i]),
                     name=f"ydef_{i}_{l}_{d}"
                 )
 
-    # (3) volume cap + Vday definition & (4) weight cap (keep if you still want it)
-    for l in WEEKS:
+    # (3) volume cap + Vday definition & (4) weight cap
+    for l in WEEKS_local:
         for d in DAYS:
             vol_sum = gp.quicksum(stops[i].volume * y[(i, l, d)] for i in ids)
             m.addConstr(Vday[(l, d)] == vol_sum, name=f"Vday_def_{l}_{d}")
@@ -382,7 +385,7 @@ def solve_formulation(
                 name=f"capG_{l}_{d}"
             )
 
-    # (5) c_i = 1 - x_{i,p0}  <=> c_i + x_{i,p0} = 1
+    # (5) change indicator: c_i + x_{i,p0} = 1
     for i in ids:
         p0 = baseline_sched[i]
         m.addConstr(c[i] + x[(i, p0)] == 1, name=f"change_{i}")
@@ -390,52 +393,52 @@ def solve_formulation(
     # (6) change budget
     m.addConstr(gp.quicksum(c[i] for i in ids) <= c_max, name="change_budget")
 
-    # (7) z_{i,l,d} >= D_{i,j} - M(2 - y_i - y_j) for all i!=j (only if OD exists)
-    # (8) z_{i,l,d} <= M y_{i,l,d}
-    for l in WEEKS:
+    # (7') min-nearest surrogate with selection binary v (all pairs)
+    for l in WEEKS_local:
         for d in DAYS:
             for i in ids:
-                m.addConstr(z[(i, l, d)] <= M * y[(i, l, d)], name=f"zub_{i}_{l}_{d}")
-                for j in ids:
-                    if j == i:
-                        continue
+                # z is active only if i visited
+                m.addConstr(z[(i, l, d)] <= M * y[(i, l, d)], name=f"z_act_{i}_{l}_{d}")
 
-                    dij = get_dist(i, j, Ddist, stops)  # <-- 핵심 (항상 meter)
+                # if i visited -> choose exactly one neighbor j (and that j must be visited)
+                m.addConstr(
+                    gp.quicksum(v[(i, j, l, d)] for j in neigh[i] if j != i) == y[(i, l, d)],
+                    name=f"chooseNbr_{i}_{l}_{d}"
+                )
 
-                    m.addConstr(
-                        z[(i, l, d)] >= dij - M * (2 - y[(i, l, d)] - y[(j, l, d)]),
-                        name=f"zlb_{i}_{j}_{l}_{d}"
-                    )
+                for j in neigh[i]:
+                    # can choose j only if j is visited
+                    m.addConstr(v[(i, j, l, d)] <= y[(j, l, d)],
+                                name=f"v_le_y_{i}_{j}_{l}_{d}")
 
-            # (9) w_{l,d} = sum_i z_{i,l,d}
+                    dij = get_dist(i, j, Ddist, stops)
+
+                    # if v=1 then z >= dij
+                    m.addConstr(z[(i, l, d)] >= dij * v[(i, j, l, d)],
+                                name=f"z_lb_{i}_{j}_{l}_{d}")
+
+                    # if v=1 then z <= dij; else relaxed by M
+                    m.addConstr(z[(i, l, d)] <= dij + M * (1 - v[(i, j, l, d)]),
+                                name=f"z_ub_{i}_{j}_{l}_{d}")
+
+            # (w) definition
             m.addConstr(
                 w[(l, d)] == gp.quicksum(z[(i, l, d)] for i in ids),
                 name=f"wdef_{l}_{d}"
             )
 
-    # (10)(11) Volume balancing: Vmax/Vmin envelope constraints
-    for l in WEEKS:
+    # Volume balancing envelope
+    for l in WEEKS_local:
         for d in DAYS:
             m.addConstr(Vmax[l] >= Vday[(l, d)], name=f"Vmax_ge_{l}_{d}")
             m.addConstr(Vmin[l] <= Vday[(l, d)], name=f"Vmin_le_{l}_{d}")
-
-    # (12) Tighter constraint range for z value in LP relaxation stage
-    dmin = compute_k_nearest_d(ids, Ddist, stops, k=1)  # k=1 또는 더 완화하려면 k=2~3
-
-    for i in ids:
-        for l in WEEKS:
-            for d in DAYS:
-                m.addConstr(
-                    z[(i, l, d)] >= dmin[i] * y[(i, l, d)],
-                    name=f"zmin_{i}_{l}_{d}"
-                )
 
     # Solve
     m.optimize()
     if m.Status not in [GRB.OPTIMAL, GRB.TIME_LIMIT]:
         raise RuntimeError(f"Optimization ended with status {m.Status}")
 
-    # extract chosen schedule per stop (tuple)
+    # extract chosen schedule per stop
     chosen_tuple: Dict[int, SchedTuple] = {}
     for i in ids:
         for p in pi[i]:
