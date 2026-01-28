@@ -54,7 +54,7 @@ def density_term_w(stops: Dict[int, Stop],
 
         # i마다 min_j dist(i,j)
         for i in ids:
-            best = 0.0
+            best = float("inf")
             for j in ids:
                 if j == i:
                     continue

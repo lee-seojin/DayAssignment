@@ -8,7 +8,7 @@ import pickle
 
 import pandas as pd
 
-DATA_SET = "1042199"
+DATA_SET = "1027633"
 
 # loading params.txt
 def load_params(params_path: Path) -> dict:
@@ -256,7 +256,7 @@ def load_od_matrix(
 # Save / Load Data
 def save_artifacts(out_dir: Path, artifacts: dict) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    pkl_path = out_dir / "artifacts.pkl"
+    pkl_path = out_dir / f"{DATA_SET}_artifacts.pkl"
     with pkl_path.open("wb") as f:
         pickle.dump(artifacts, f, protocol=pickle.HIGHEST_PROTOCOL)
     return pkl_path

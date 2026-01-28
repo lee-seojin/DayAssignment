@@ -35,10 +35,11 @@ def to_daybits7(t: tuple) -> DayBits:
 
 
 def build_p_from_gurobi_csv(csv_path: Path) -> Dict[int, SchedTuple]:
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path, skiprows=3)
 
     required = {"custno", "week_AFT", "day_AFT"}
     missing = required - set(df.columns)
+
     if missing:
         raise KeyError(f"CSV missing columns: {missing}")
 
@@ -57,7 +58,7 @@ def build_p_from_gurobi_csv(csv_path: Path) -> Dict[int, SchedTuple]:
 def main():
     # 너 프로젝트에서 artifacts.pkl 저장된 위치로만 맞춰주면 됨
     ARTIFACTS_PATH = Path("baseline_data_store/artifacts.pkl")
-    GUROBI_CSV = Path("./resultdetail_gurobi_tuplepool.csv")
+    GUROBI_CSV = Path("./results_optimal/1042199_20260127_171102_optimal_resultdetail.csv")
 
     artifacts = load_artifacts(ARTIFACTS_PATH)
     p = build_p_from_gurobi_csv(GUROBI_CSV)

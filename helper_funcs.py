@@ -69,6 +69,7 @@ def get_dist(
 
 def try_apply_change(
         stop_id: int,
+        stops: Dict[int, Stop],
         new_sched: SchedTuple,
         p: Dict[int, SchedTuple],
         baseline_sched: Dict[int, SchedTuple],
@@ -76,6 +77,18 @@ def try_apply_change(
         C_used: int,
         C_max: int,
 ) -> Tuple[bool, int]:
+    s = stops[stop_id]
+    base_w, base_d = baseline_sched[stop_id]
+
+    # dowlocked: 1이면 요일 변경 불가
+    if s.dowlockcd == 1 and new_sched[1] != base_d:
+        return False, C_used
+
+    # wccd_flag: 1이면 주차 패턴 변경 불가
+    if s.wccd_flag == 1 and new_sched[0] != base_w:
+        return False, C_used
+
+    # change budget check
     before = changed[stop_id]
     after = 1 if new_sched != baseline_sched[stop_id] else 0
     new_C_used = C_used - before + after
@@ -83,8 +96,10 @@ def try_apply_change(
     if new_C_used > C_max:
         return False, C_used
 
+    # apply
     p[stop_id] = new_sched
     changed[stop_id] = after
+
     return True, new_C_used
 
 def make_run_prefix(dataset: str) -> str:

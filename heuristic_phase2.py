@@ -85,6 +85,7 @@ def _try_find_best_relocate(
 
     for stop_id in high_ids:
         old_sched = p[stop_id]
+        current_stop = stops[stop_id]
         vol_i = float(stops[stop_id].volume)
         cid = stop_to_cluster.get(stop_id)
         if cid is None:
@@ -97,9 +98,14 @@ def _try_find_best_relocate(
         # feasible options
         key = (stops[stop_id].dowcd, stops[stop_id].frequency)
         options = sched_cache.get(key, [])
-
         if old_sched not in options:
             options = options + [old_sched]
+
+        base_w, base_d = baseline_sched[stop_id]
+        if current_stop.dowlockcd == 1:
+            options = [s for s in options if s[1] == base_d]
+        if current_stop.wccd_flag == 1:
+            options = [s for s in options if s[0] == base_w]
 
         for new_sched in options:
             if new_sched == old_sched:
@@ -124,12 +130,22 @@ def _try_find_best_relocate(
             if (C_used - before_c + after_c) > C_max:
                 continue
 
-            # virtual V update simulation
-            V[(l_from, d_from)] -= vol_i
-            V[(l_to, d_to)] += vol_i
+            delta_cells = [] # 어느 셀에서 volume이 얼마나 바뀌는지 저장
+            for l in WEEKS:
+                for d in DAYS_5:
+                    old = a(old_sched, l, d)
+                    new = a(new_sched, l, d)
+                    if old != new: # 바뀔 때만
+                        delta = (new - old) * vol_i
+                        delta_cells.append((l, d, delta))
+
+            # apply
+            for l, d, delta in delta_cells:
+                V[(l, d)] += delta
             after_val = metric_value(kind, V)
-            V[(l_from, d_from)] += vol_i
-            V[(l_to, d_to)] -= vol_i
+            # rollback
+            for l, d, delta in delta_cells:
+                V[(l, d)] -= delta
 
             if after_val < before_val and (best is None or after_val < best[2]):
                 best = (stop_id, new_sched, after_val)
@@ -177,7 +193,7 @@ def phase_2(
 
     stops: Dict[int, Stop] = artifacts["stops"]
     baseline_sched: Dict[int, SchedTuple] = artifacts["baseline_sched"]
-    sched_cache: Dict[Tuple[str, int], List[SchedTuple]] = artifacts["sched_cache"]
+    schedrules_map: Dict[Tuple[str, int], List[SchedTuple]] = artifacts["sched_cache"]
     C_max: int = int(artifacts["C_max"])
 
     stop_to_cluster = build_stop_to_cluster(clusters)
@@ -214,7 +230,7 @@ def phase_2(
 
             # relocate best 찾기
             best = _try_find_best_relocate(kind=kind, V=V, stops=stops, p=p, changed=changed, C_used=C_used,
-                                           C_max=C_max, baseline_sched=baseline_sched, sched_cache=sched_cache,
+                                           C_max=C_max, baseline_sched=baseline_sched, sched_cache=schedrules_map,
                                            stop_to_cluster=stop_to_cluster, nucleus=nucleus, high_ids=high_ids,
                                            from_cell=from_cell, to_cell=to_cell)
 
@@ -228,6 +244,7 @@ def phase_2(
             stop_id, new_sched, _ = best
             ok, C_used = try_apply_change(
                 stop_id=stop_id,
+                stops=stops,
                 new_sched=new_sched,
                 p=p,
                 baseline_sched=baseline_sched,

@@ -452,6 +452,8 @@ def solve_formulation(
 
     return m, chosen_tuple, {i: int(round(c[i].X)) for i in ids}
 
+def _weektuple_to_str(weekt):
+    return ",".join(str(int(x)) for x in weekt)   # (1,3) -> "1,3"
 
 # Main
 def main():
@@ -492,23 +494,30 @@ def main():
         s.chosen = ScheduleView(w_t, d_b)
         s.changed = changed[s.custno]
 
-    # 7) export resultdetail-like
+    # 7) export in the same column structures with heuristic
     rows = []
     for s in stops.values():
         assert s.chosen is not None
+
+        base_w = s.baseline.week_tuple
+        base_d = s.baseline.day_bits
+        ch_w = s.chosen.week_tuple
+        ch_d = s.chosen.day_bits
+
         rows.append({
-            "custno": s.custno,
-            "volume": s.volume,
-            "weight": s.weight,
-            "material_typ": s.material_typ,
-            "frequency": s.frequency,
-            "dowcd_BEF": s.dowcd,
-            "week_BEF": s.baseline.week_key(),
-            "day_BEF": s.baseline.day_key(),
-            "changed": s.changed,
-            "week_AFT": s.chosen.week_key(),
-            "day_AFT": s.chosen.day_key(),
-            **{f"AFT_{d}": int(s.chosen.day_bits[DAYS.index(d)]) for d in DAYS},
+            "stop_id": s.custno,
+            "xcoord": float(s.xcoord),
+            "ycoord": float(s.ycoord),
+            "volume": float(s.volume),
+            "frequency": int(s.frequency),
+            "baseline_dowcd": str(s.dowcd),
+            "baseline_week": _weektuple_to_str(base_w),
+            "wccd_flag": int(s.wccd_flag) if s.wccd_flag is not None else 0,
+            "baseline_daybits": tuple(int(x) for x in base_d),
+            "dowlockcd": int(s.dowlockcd) if s.dowlockcd is not None else 0,
+            "chosen_week": _weektuple_to_str(ch_w),
+            "chosen_daybits": tuple(int(x) for x in ch_d),
+            "changed": int(s.changed),
         })
 
     run_prefix = make_run_prefix(DATA_SET)
@@ -554,20 +563,25 @@ def main():
         opt_gap,
         ("O" if is_opt else "X"),
         RUN_TIME,
-        K_NEIGH,  # 네 코드에서 k 쓰고 있으면 그 변수명으로 맞추기 (없으면 비워도 됨)
+        K_NEIGH,
         W1,
         W2,
     ]
 
-    # write: 2 meta rows + blank row + stop table =
+    # write: 2 meta rows + blank row + stop table
     with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(meta_header)
         w.writerow(meta_values)
-        w.writerow([])  # 빈 줄(선택)
+        w.writerow([])
 
-    # stop table은 append로 붙이기
-    out = pd.DataFrame(rows)
+    # write: sort columns manually
+    out = pd.DataFrame(rows, columns=[
+        "stop_id", "xcoord", "ycoord", "volume", "frequency",
+        "baseline_dowcd", "baseline_week", "wccd_flag",
+        "baseline_daybits", "dowlockcd",
+        "chosen_week", "chosen_daybits", "changed",
+    ])
     out.to_csv(out_path, mode="a", index=False, encoding="utf-8-sig")
 
     print(f"Saved: {out_path}")

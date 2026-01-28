@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Tuple
-import csv
 import time
+import csv
+from datetime import datetime
 
 from helper_funcs import compute_V, make_run_prefix
 from heuristic_aggr import load_artifacts, DATA_SET
@@ -14,19 +15,9 @@ from heuristic_objective import compute_objective
 
 W1, W2 = 1.0, 1.0
 
-def _daybits_to_str(daybits: Tuple[int, ...]) -> str:
-    # (mon,tue,wed,thu,fri,sat,sun) -> "1100100"
-    return "".join(str(int(x)) for x in daybits)
-
-
 def _weektuple_to_str(weekt: Tuple[int, ...]) -> str:
     # (1,3,4) -> "1,3,4"
     return ",".join(str(int(x)) for x in weekt)
-
-
-import time
-import csv
-from datetime import datetime
 
 def save_heuristic_onefile_csv(
     out_path: Path,
@@ -61,8 +52,9 @@ def save_heuristic_onefile_csv(
     fieldnames = [
         "stop_id",
         "xcoord", "ycoord",
-        "volume", "frequency", "dowcd",
-        "baseline_week", "baseline_daybits",
+        "volume", "frequency", "baseline_dowcd",
+        "baseline_week", "wccd_flag",
+        "baseline_daybits", "dowlockcd",
         "chosen_week", "chosen_daybits",
         "changed",
     ]
@@ -88,34 +80,31 @@ def save_heuristic_onefile_csv(
                 "ycoord": float(s.ycoord),
                 "volume": float(s.volume),
                 "frequency": int(s.frequency),
-                "dowcd": str(s.dowcd),
+                "baseline_dowcd": str(s.dowcd),
                 "baseline_week": _weektuple_to_str(base_w),
-                "baseline_daybits": _daybits_to_str(base_d),
+                "wccd_flag": int(s.wccd_flag) if s.wccd_flag is not None else 0,
+                "baseline_daybits": tuple(int(x) for x in base_d),
+                "dowlockcd": int(s.dowlockcd) if s.dowlockcd is not None else 0,
                 "chosen_week": _weektuple_to_str(ch_w),
-                "chosen_daybits": _daybits_to_str(ch_d),
+                "chosen_daybits": tuple(int(x) for x in ch_d),
                 "changed": int(changed.get(stop_id, 0)),
             })
-
 
 
 def main():
     start_time = time.perf_counter()
 
-    ARTIFACTS_PATH = Path("baseline_data_store/artifacts.pkl")
+    ARTIFACTS_PATH = Path(f"baseline_data_store/{DATA_SET}_artifacts.pkl")
     artifacts = load_artifacts(ARTIFACTS_PATH)
 
     # inputs from artifacts
     stops: Dict[int, Stop] = artifacts["stops"]
     baseline_sched: Dict[int, SchedTuple] = artifacts["baseline_sched"]
-    C_max: int = int(artifacts["C_max"])
-    Ddist = artifacts["Ddist"]
-    priority_map = artifacts["priority_map"]
 
     # Phase 0: basic state
     p: Dict[int, SchedTuple] = dict(baseline_sched)   # current schedule (baseline start)
     changed: Dict[int, int] = {stop_id: 0 for stop_id in stops.keys()}
     C_used: int = 0
-    V = compute_V(stops, p)
 
     # Phase 1, 2: clustering & relocation
     clusters, nucleus, p, changed, C_used = phase_1(artifacts, p, changed, C_used)

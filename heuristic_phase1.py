@@ -1,9 +1,9 @@
 from __future__ import annotations
 from collections import defaultdict
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Tuple, Set, Optional
 import numpy as np
 from sklearn.cluster import DBSCAN
-from data_type import Stop, DayBits, SchedTuple
+from data_type import Stop, DayBits, SchedTuple, WeekTuple, ScheduleView
 from helper_funcs import get_dist, try_apply_change
 
 def build_priority_groups(
@@ -119,27 +119,40 @@ def overlap_score(core: DayBits, cand: DayBits, alpha: float = 0.2) -> float:
 
     return overlap - alpha * extra
 
-def best_sched_to_fit_cluster(
-    freq: int,
+def choose_best_sched(
+    candidates: List[SchedTuple],
+    core_week: WeekTuple,
     core_day: DayBits,
-    darules_map: Dict[int, List[DayBits]],
-    baseline_day: DayBits,
-    alpha: float = 0.2) -> DayBits:
+    alpha: float,
+) -> Optional[SchedTuple]:
+    if not candidates:
+        return None
 
-    cands = list(darules_map[freq])
-    if baseline_day not in cands:
-        cands.append(baseline_day) # baseline도 항상 후보에 포함
+    # day 겹침 최우선
+    scored = []
+    best_day = -1e18
+    for (w, d) in candidates:
+        day_score = overlap_score(core_day, d, alpha=alpha)
+        if day_score > best_day:
+            best_day = day_score
+        scored.append((w, d, day_score))
 
-    best = cands[0]
-    best_s = -1e18
+    # day_score 최대인 것만 추림, 1e-9 는 bit 연산에서 유래되는 오차를 수용하기 위한 기준으로, 사실상 ds = best_day인 것만 골라내려는 것
+    top = [(w, d, ds) for (w, d, ds) in scored if abs(ds - best_day) <= 1e-9]
 
-    for d in cands:
-        s = overlap_score(core_day, d, alpha=alpha)
-        if s > best_s:
-            best_s = s
-            best = d
+    # 주차 겹침 점수가 최대인 것 최종 선택
+    core_set = set(core_week)
+    best, best_score = None, -1e18
+
+    for (w, d, ds) in top:
+        week_overlap = len(set(w) & core_set)
+        score = week_overlap
+        if score > best_score:
+            best_score = score
+            best = (w, d)
 
     return best
+
 
 def phase_1(
     artifacts: dict,
@@ -151,7 +164,7 @@ def phase_1(
     # artifacts에서 참조 데이터 로드
     stops: Dict[int, Stop] = artifacts["stops"]
     Ddist: Dict[Tuple[int, int], float] = artifacts["Ddist"]
-    darules_map: Dict[int, List[DayBits]] = artifacts["darules_map"]
+    schedrules_map: Dict[Tuple[str, int], List[SchedTuple]] = artifacts["sched_cache"]
     priority_map: Dict[Tuple[str, int], int] = artifacts["priority_map"]
     baseline_sched: Dict[int, SchedTuple] = artifacts["baseline_sched"]
     C_max: int = int(artifacts["C_max"])
@@ -192,6 +205,14 @@ def phase_1(
             continue
 
         for stop_id in priority_groups[pr]:
+            current_stop = stops[stop_id]
+            candidates = schedrules_map.get((current_stop.dowcd, current_stop.frequency), []).copy()
+
+            base_w, base_d = baseline_sched[stop_id]
+            if current_stop.dowlockcd:
+                candidates = [sched for sched in candidates if sched[1] == base_d]
+            if current_stop.wccd_flag:
+                candidates = [sched for sched in candidates if sched[0] == base_w]
 
             # 후보 클러스터 (가까운 nucleus 기준)
             cand_cids = nearest_k_nuclei(stop_id, nucleus, stops, Ddist, k=k_nearest)
@@ -204,39 +225,30 @@ def phase_1(
                 nucleus[cid] = stop_id
                 continue
 
-            # (1) 후보 클러스터별 평가를 "딱 1번만" 계산해서 저장
+            # (1) 현재 stop이 할당될 수 있는 후보 클러스터별 평가를 1번만 계산해서 저장
             fit_sched: Dict[int, SchedTuple] = {}    # cid -> (core_week, best_day)
             need_change: Dict[int, bool] = {}        # cid -> p[stop_id] 변경 필요 여부
             dist_to: Dict[int, float] = {}           # cid -> dist(stop_id, nucleus[cid])
 
-            stop_freq = int(stops[stop_id].frequency)
-            _bw, baseline_day = baseline_sched[stop_id]
-
             for cid in cand_cids:
                 nuc_id = nucleus[cid]
                 dist_to[cid] = get_dist(stop_id, nuc_id, Ddist, stops)
-
                 core_week, core_day = p[nuc_id]
 
-                best_day = best_sched_to_fit_cluster(
-                    freq=stop_freq,
-                    core_day=core_day,
-                    darules_map=darules_map,
-                    baseline_day=baseline_day,
-                    alpha=alpha,
-                )
-
-                cand_sched: SchedTuple = (core_week, best_day)
-                fit_sched[cid] = cand_sched
-                need_change[cid] = (p[stop_id] != cand_sched)
+                best_sched = choose_best_sched(candidates, core_week, core_day, alpha=alpha)
+                if best_sched is None:
+                    continue
+                fit_sched[cid] = best_sched
+                need_change[cid] = (p[stop_id] != best_sched)
 
             usable_cids = [cid for cid in cand_cids if cid in fit_sched]
+            # cid 후보와 유의미하게 겹쳐질 수 있는 schedule이 feasible schedule 중에 없을 때 (현재 코드 구조에서는 거의 발생 x) 그냥 아무거나 반환
             if not usable_cids:
                 chosen_cid = cand_cids[0]
                 clusters[chosen_cid].append(stop_id)
                 continue
 
-            # (2) 변경 없이 가능하면: 그 중 "가장 가까운" 클러스터로
+            # (2) 변경 없이 가능하면: 그 중 가장 가까운 클러스터로
             no_change_cids = [cid for cid in usable_cids if not need_change[cid]]
             if no_change_cids:
                 chosen_cid = min(no_change_cids, key=lambda cid: dist_to[cid])
@@ -251,6 +263,7 @@ def phase_1(
                 # C_used/C_max 반영해서 상태 dict만 업데이트
                 ok, C_used = try_apply_change(
                     stop_id=stop_id,
+                    stops=stops,
                     new_sched=new_sched,
                     p=p,
                     baseline_sched=baseline_sched,
@@ -271,4 +284,3 @@ def phase_1(
         nucleus[cid] = choose_nucleus(members, stops, Ddist)
 
     return clusters, nucleus, p, changed, C_used
-
