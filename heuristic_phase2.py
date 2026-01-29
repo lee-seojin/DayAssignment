@@ -1,176 +1,105 @@
 from __future__ import annotations
 from typing import Dict, Tuple, List, Optional
-from data_type import Stop, SchedTuple, DayBits, WEEKS, DAYS_5
+import os
+import matplotlib.pyplot as plt
+from typing import Dict, Tuple
+from data_type import WEEKS, DAYS_5
+
+from data_type import Stop, SchedTuple, WEEKS, DAYS_5, Cell
 from helper_funcs import a, compute_V, try_apply_change
 
-def imbalance_between_weeks(V: Dict[Tuple[int, str], float]) -> float:
-    week_totals = [sum(V[(l, d)] for d in DAYS_5) for l in WEEKS]
-    return max(week_totals) - min(week_totals)
-
-def imbalance_within_week(V: Dict[Tuple[int, str], float], l: int) -> float:
-    vals = [V[(l, d)] for d in DAYS_5]
-    return max(vals) - min(vals)
-
-def imbalance_overall_cells(V: Dict[Tuple[int, str], float]) -> float:
-    vals = V.values()
-    return max(vals) - min(vals)
-
-def metric_value(kind: str, V: Dict[Tuple[int, str], float]) -> float:
-    if kind == "between_weeks":
-        return imbalance_between_weeks(V)
-    if kind == "within_week":
-        return max(imbalance_within_week(V, l) for l in WEEKS)
-    return imbalance_overall_cells(V)
-
-def _daybits(s: SchedTuple) -> DayBits:
-    return s[1]
-
-def overlap_count(core: DayBits, cand: DayBits) -> int:
-    # nucleus schedule과 후보 schedule이 겹치는(둘 다 1인) 요일 개수
-    return sum(1 for k in range(7) if core[k] == 1 and cand[k] == 1)
-
-def build_stop_to_cluster(clusters: Dict[int, List[int]]) -> Dict[int, int]:
-    out: Dict[int, int] = {}
-    for cid, members in clusters.items():
-        for sid in members:
-            out[sid] = cid
+def _cells_toggled(old_sched: SchedTuple, new_sched: SchedTuple) -> List[Tuple[int, str, int]]:
+    """
+    old->new로 바꿀 때 방문 여부가 달라지는 셀들만 반환.
+    각 원소: (l, d, delta_visit) where delta_visit ∈ {-1, +1}
+    """
+    out: List[Tuple[int, str, int]] = []
+    for l in WEEKS:
+        for d in DAYS_5:
+            old = a(old_sched, l, d)
+            new = a(new_sched, l, d)
+            if old != new:
+                out.append((l, d, new - old))
     return out
 
-def pick_high_low_days_in_week(V: Dict[Tuple[int, str], float], l: int) -> Tuple[str, str]:
-    d_high = max(DAYS_5, key=lambda d: V[(l, d)])
-    d_low = min(DAYS_5, key=lambda d: V[(l, d)])
-    return d_high, d_low
 
-def pick_week_high_low(V: Dict[Tuple[int, str], float]) -> Tuple[int, int]:
-    week_total = {l: sum(V[(l, d)] for d in DAYS_5) for l in WEEKS}
-    l_high = max(WEEKS, key=lambda l: week_total[l])
-    l_low = min(WEEKS, key=lambda l: week_total[l])
-    return l_high, l_low
+def _apply_delta_to_V(
+    V: Dict[Cell, float],
+    delta_cells: List[Tuple[int, str, int]],
+    vol: float,
+    sign: int,
+) -> None:
+    """
+    sign=+1이면 delta 적용, sign=-1이면 rollback.
+    """
+    for l, d, dv in delta_cells:
+        V[(l, d)] += sign * dv * vol
 
-def pick_high_low_cell(V: Dict[Tuple[int, str], float]) -> Tuple[Tuple[int, str], Tuple[int, str]]:
-    high = max(V.keys(), key=lambda k: V[k])
-    low = min(V.keys(), key=lambda k: V[k])
-    return high, low
+def _range_metric(V: Dict[Cell, float]) -> float:
+    # range와 동시에 0 셀 개수 줄이기
+    vals = list(V.values())
+    mu = sum(vals) / len(vals)
+    return sum(abs(v - mu) for v in vals)
+
+def _argmax_cell(V: Dict[Cell, float]) -> Cell:
+    return max(V.keys(), key=lambda k: V[k])
 
 
-def _try_find_best_relocate(
-    kind: str,
-    V: Dict[Tuple[int, str], float],
-    stops: Dict[int, Stop],
-    p: Dict[int, SchedTuple],
-    changed: Dict[int, int],
-    C_used: int,
-    C_max: int,
+def _argmin_cell(V: Dict[Cell, float]) -> Cell:
+    return min(V.keys(), key=lambda k: V[k])
+
+
+def _filter_options_with_locks(
+    stop: Stop,
+    options: List[SchedTuple],
     baseline_sched: Dict[int, SchedTuple],
-    sched_cache: Dict[Tuple[str, int], List[SchedTuple]],
-    stop_to_cluster: Dict[int, int],
-    nucleus: Dict[int, int],
-    high_ids: List[int],
-    # target cells
-    from_cell: Tuple[int, str],
-    to_cell: Tuple[int, str],
-) -> Optional[Tuple[int, SchedTuple, float]]:
+    stop_id: int,
+) -> List[SchedTuple]:
     """
-    relocate-only: from_cell 방문을 끄고, to_cell 방문을 켜는 schedule change 찾기
-    + nucleus overlap 악화는 금지
-    + budget prune
-    + best improvement 반환
+    baseline 기준 lock 반영
+    - dowlockcd==1: daybits 고정 (baseline daybits만 허용)
+    - wccd_flag==1: weektuple 고정 (baseline weektuple만 허용)
     """
-    before_val = metric_value(kind, V)
+    base_w, base_d = baseline_sched[stop_id]
 
-    l_from, d_from = from_cell
-    l_to, d_to = to_cell
-
-    best: Optional[Tuple[int, SchedTuple, float]] = None  # (stop_id, new_sched, after_metric)
-
-    for stop_id in high_ids:
-        old_sched = p[stop_id]
-        current_stop = stops[stop_id]
-        vol_i = float(stops[stop_id].volume)
-        cid = stop_to_cluster.get(stop_id)
-        if cid is None:
-            continue
-
-        nuc_id = nucleus[cid]
-        core_bits = _daybits(p[nuc_id])
-        old_overlap = overlap_count(core_bits, _daybits(old_sched))
-
-        # feasible options
-        key = (stops[stop_id].dowcd, stops[stop_id].frequency)
-        options = sched_cache.get(key, [])
-        if old_sched not in options:
-            options = options + [old_sched]
-
-        base_w, base_d = baseline_sched[stop_id]
-        if current_stop.dowlockcd == 1:
-            options = [s for s in options if s[1] == base_d]
-        if current_stop.wccd_flag == 1:
-            options = [s for s in options if s[0] == base_w]
-
-        for new_sched in options:
-            if new_sched == old_sched:
-                continue
-
-            # relocate feasibility: from_cell off, to_cell on
-            if a(old_sched, l_from, d_from) == 0:
-                continue
-            if a(new_sched, l_from, d_from) != 0:
-                continue
-            if a(new_sched, l_to, d_to) != 1:
-                continue
-
-            # nucleus 구조 보호
-            new_overlap = overlap_count(core_bits, _daybits(new_sched))
-            if new_overlap < old_overlap:
-                continue
-
-            # 변경 max 횟수 넘기지 않는 경우에만 진행
-            before_c = changed[stop_id]
-            after_c = 1 if new_sched != baseline_sched[stop_id] else 0
-            if (C_used - before_c + after_c) > C_max:
-                continue
-
-            delta_cells = [] # 어느 셀에서 volume이 얼마나 바뀌는지 저장
-            for l in WEEKS:
-                for d in DAYS_5:
-                    old = a(old_sched, l, d)
-                    new = a(new_sched, l, d)
-                    if old != new: # 바뀔 때만
-                        delta = (new - old) * vol_i
-                        delta_cells.append((l, d, delta))
-
-            # apply
-            for l, d, delta in delta_cells:
-                V[(l, d)] += delta
-            after_val = metric_value(kind, V)
-            # rollback
-            for l, d, delta in delta_cells:
-                V[(l, d)] -= delta
-
-            if after_val < before_val and (best is None or after_val < best[2]):
-                best = (stop_id, new_sched, after_val)
-
-    return best
+    out = options
+    if stop.dowlockcd == 1:
+        out = [s for s in out if s[1] == base_d]
+    if stop.wccd_flag == 1:
+        out = [s for s in out if s[0] == base_w]
+    return out
 
 
-# Phase2 target selection per kind
-def _targets_within_week(V: Dict[Tuple[int, str], float]) -> Tuple[Tuple[int, str], Tuple[int, str]]:
-    # 가장 imbalance 큰 week 선택
-    l0 = max(WEEKS, key=lambda l: imbalance_within_week(V, l))
-    d_high, d_low = pick_high_low_days_in_week(V, l0)
-    return (l0, d_high), (l0, d_low)
+def save_calendar_heatmap(
+    V: Dict[Cell, float],
+    tag: str,
+    out_dir: str = "phase2_heatmaps",
+) -> None:
+    """
+    4주 x 5일 달력형 heatmap 저장
+    """
+    os.makedirs(out_dir, exist_ok=True)
 
-def _targets_between_weeks(V: Dict[Tuple[int, str], float]) -> Tuple[Tuple[int, str], Tuple[int, str]]:
-    # week total 기준 high week / low week 선택
-    l_high, l_low = pick_week_high_low(V)
-    # high week에서 가장 큰 day, low week에서 가장 작은 day로 받기
-    d_from = max(DAYS_5, key=lambda d: V[(l_high, d)])
-    d_to = min(DAYS_5, key=lambda d: V[(l_low, d)])
-    return (l_high, d_from), (l_low, d_to)
+    grid = [[V[(l, d)] for d in DAYS_5] for l in WEEKS]
 
-def _targets_overall_cells(V: Dict[Tuple[int, str], float]) -> Tuple[Tuple[int, str], Tuple[int, str]]:
-    high, low = pick_high_low_cell(V)
-    return high, low
+    fig, ax = plt.subplots()
+    im = ax.imshow(grid)
+
+    ax.set_xticks(range(len(DAYS_5)))
+    ax.set_xticklabels(DAYS_5)
+    ax.set_yticks(range(len(WEEKS)))
+    ax.set_yticklabels([f"W{l}" for l in WEEKS])
+
+    for i, l in enumerate(WEEKS):
+        for j, d in enumerate(DAYS_5):
+            ax.text(j, i, f"{grid[i][j]:.0f}", ha="center", va="center", fontsize=8)
+
+    ax.set_title(tag)
+    fig.colorbar(im, ax=ax)
+
+    fname = f"{tag}.png".replace(" ", "_")
+    fig.savefig(os.path.join(out_dir, fname), bbox_inches="tight")
+    plt.close(fig)
 
 
 def phase_2(
@@ -178,88 +107,142 @@ def phase_2(
     p: Dict[int, SchedTuple],
     changed: Dict[int, int],
     C_used: int,
-    clusters: Dict[int, List[int]],
+    clusters: Dict[int, List[int]],   # 안 쓰지만 시그니처 유지
     nucleus: Dict[int, int],
 ) -> Tuple[Dict[int, SchedTuple], Dict[int, int], int]:
     """
-      1) between_weeks: 주차 총량 균형
-      2) within_week: 주차 내 요일 균형
-      3) overall_cells: 전체 (l,d) 셀 균형
-    - nucleus overlap 악화 move 금지 (Phase1 구조 보호)
+    max(V)-min(V) (range)만 직접 줄이는 greedy relocate.
+    - 매 iteration마다 현재 V를 보고 max cell / min cell 갭을 줄이는 move를 찾음
+    - to_cell을 고정하지 않음: stop이 갈 수 있는 feasible schedule 중 range를 가장 줄이는 걸 선택
+    - lock/dowcd/freq/sched_cache 기반 feasible schedule만 사용
     """
-    max_outer_iters = 200
-    no_improve_patience = 5
-    max_candidate_stops = 200
 
     stops: Dict[int, Stop] = artifacts["stops"]
     baseline_sched: Dict[int, SchedTuple] = artifacts["baseline_sched"]
-    schedrules_map: Dict[Tuple[str, int], List[SchedTuple]] = artifacts["sched_cache"]
+    sched_cache: Dict[Tuple[str, int], List[SchedTuple]] = artifacts["sched_cache"]
     C_max: int = int(artifacts["C_max"])
 
-    stop_to_cluster = build_stop_to_cluster(clusters)
+    # 튜닝 파라미터 (원하는 만큼 올릴 수 있음)
+    max_iters = 2000
+    max_stop_candidates = 400         # max cell에 있는 stop들 중 상위 N개만 보자 (너무 크면 느려짐)
 
-    # init V
+    # 초기 V
     V = compute_V(stops, p)
+    save_calendar_heatmap(V, tag="phase2_start")
+    cur_metric = _range_metric(V)
 
-    # volume 큰 stop부터 후보로
-    all_ids = list(stops.keys())
-    all_ids.sort(key=lambda i: (-float(stops[i].volume), i))
+    # max cell에 있는 stop들 추출
+    def stops_in_cell(cell: Cell) -> List[int]:
+        l, d = cell
+        return [sid for sid in stops.keys() if a(p[sid], l, d) == 1]
 
-    # kind별로 완전히 분리 실행
-    for kind in ("between_weeks", "within_week", "overall_cells"):
+    # stop 우선순위: 자유도(후보 많음) + 효과(볼륨 큼)로 정렬
+    def stop_priority_key(sid: int, opt_count: int) -> Tuple[int, float, int]:
+        # opt_count 클수록 우선, volume 클수록 우선
+        return (-opt_count, -float(stops[sid].volume), sid)
+
+    no_improve = 0
+    patience = 200  # 이만큼 연속으로 개선 없으면 종료
+
+    for it in range(max_iters):
+        max_cell = _argmax_cell(V)
+
+        # max cell에 있는 stop 후보들
+        cand_ids = stops_in_cell(max_cell)
+
+        # 각 stop의 feasible option 개수를 빠르게 계산해서 우선순위 정렬
+        scored_ids: List[Tuple[int, int]] = []
+        for sid in cand_ids:
+            s = stops[sid]
+            key = (s.dowcd, s.frequency)
+            options = sched_cache.get(key, [])
+            # old_sched 포함
+            old_sched = p[sid]
+            if old_sched not in options:
+                options = options + [old_sched]
+            options = _filter_options_with_locks(s, options, baseline_sched, sid)
+            scored_ids.append((sid, len(options)))
+
+        scored_ids.sort(key=lambda x: stop_priority_key(x[0], x[1]))
+        cand_ids = [sid for sid, _ in scored_ids[:max_stop_candidates]]
+
+        best_move: Optional[Tuple[int, SchedTuple, float]] = None  # (sid, new_sched, new_metric)
+
+        # move 탐색
+        for sid in cand_ids:
+            s = stops[sid]
+            vol = float(s.volume)
+            old_sched = p[sid]
+
+            # feasible schedules
+            key = (s.dowcd, s.frequency)
+            options = sched_cache.get(key, [])
+            if old_sched not in options:
+                options = options + [old_sched]
+            options = _filter_options_with_locks(s, options, baseline_sched, sid)
+
+            # delta를 미리 계산해두면 빠름
+            for new_sched in options:
+                if new_sched == old_sched:
+                    continue
+
+                # budget check
+                before_c = changed.get(sid, 0)
+                after_c = 1 if new_sched != baseline_sched[sid] else 0
+                if (C_used - before_c + after_c) > C_max:
+                    continue
+
+                # 실제로 max_cell에서 빠지지 않으면 의미 없음(최소 조건)
+                lmax, dmax = max_cell
+                if a(new_sched, lmax, dmax) != 0:
+                    continue
+
+                delta_cells = _cells_toggled(old_sched, new_sched)
+                if not delta_cells:
+                    continue
+
+                # V에 임시 적용 → metric 평가 → rollback
+                _apply_delta_to_V(V, delta_cells, vol, sign=+1)
+                new_metric = _range_metric(V)
+                _apply_delta_to_V(V, delta_cells, vol, sign=-1)
+
+                if new_metric < cur_metric:
+                    if best_move is None or new_metric < best_move[2]:
+                        best_move = (sid, new_sched, new_metric)
+
+        # 개선 move 없으면 종료 또는 계속
+        if best_move is None:
+            no_improve += 1
+            if no_improve >= patience:
+                break
+            continue
+
+        # best move 적용
+        sid, new_sched, new_metric = best_move
+        ok, C_used2 = try_apply_change(
+            stop_id=sid,
+            stops=stops,
+            new_sched=new_sched,
+            p=p,
+            baseline_sched=baseline_sched,
+            changed=changed,
+            C_used=C_used,
+            C_max=C_max,
+        )
+        if not ok:
+            # 이론상 여기까지 오면 거의 ok여야 하는데, 그래도 안전하게 처리
+            no_improve += 1
+            if no_improve >= patience:
+                break
+            continue
+
+        C_used = C_used2
+        V = compute_V(stops, p)
+        cur_metric = _range_metric(V)
         no_improve = 0
 
-        for _ in range(max_outer_iters):
-            before_val = metric_value(kind, V)
+        save_calendar_heatmap(V, tag=f"iter_{it}_metric_{cur_metric:.0f}")
 
-            # 타겟 셀 선택
-            if kind == "between_weeks":
-                from_cell, to_cell = _targets_between_weeks(V)
-            elif kind == "within_week":
-                from_cell, to_cell = _targets_within_week(V)
-            else:
-                from_cell, to_cell = _targets_overall_cells(V)
-
-            l_from, d_from = from_cell
-
-            # from_cell에 실제로 있는 stop 후보들 뽑기
-            high_ids: List[int] = []
-            for sid in all_ids[:max_candidate_stops]:
-                if a(p[sid], l_from, d_from) == 1:
-                    high_ids.append(sid)
-
-            # relocate best 찾기
-            best = _try_find_best_relocate(kind=kind, V=V, stops=stops, p=p, changed=changed, C_used=C_used,
-                                           C_max=C_max, baseline_sched=baseline_sched, sched_cache=schedrules_map,
-                                           stop_to_cluster=stop_to_cluster, nucleus=nucleus, high_ids=high_ids,
-                                           from_cell=from_cell, to_cell=to_cell)
-
-            if best is None:
-                no_improve += 1
-                if no_improve >= no_improve_patience:
-                    break
-                continue
-
-            # 적용
-            stop_id, new_sched, _ = best
-            ok, C_used = try_apply_change(
-                stop_id=stop_id,
-                stops=stops,
-                new_sched=new_sched,
-                p=p,
-                baseline_sched=baseline_sched,
-                changed=changed,
-                C_used=C_used,
-                C_max=C_max,
-            )
-
-            if ok:
-                V = compute_V(stops, p)
-                after_val = metric_value(kind, V)
-                no_improve = 0
-            else:
-                no_improve += 1
-                if no_improve >= no_improve_patience:
-                    break
+    save_calendar_heatmap(V, tag="phase2_final")
 
     return p, changed, C_used

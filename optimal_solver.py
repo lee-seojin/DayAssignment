@@ -9,14 +9,14 @@ from gurobipy import GRB
 import math
 import csv
 from datetime import datetime
+from typing import Dict, Tuple
 
 from dataclasses import dataclass
 from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M, make_run_prefix
 
-DATA_SET = "1042199"
+DATA_SET = "1027633" # "1042199"
 W1, W2 = 1.0, 1.0
-K_NEIGH = 10
-RUN_TIME = 60
+RUN_TIME = 600
 
 # Constants (days)
 DAYS = ["MON", "TUE", "WED", "THU", "FRI"]
@@ -217,54 +217,53 @@ def build_stops_and_pi(aggr: pd.DataFrame, pools: Pools, darules_map: Dict[int, 
 
 
 # Distance matrix (Euclidean)
-from pathlib import Path
-from typing import Dict, Tuple, Literal
-
 def load_od_matrix(
-    od_dir: Path,
-    value: Literal["dist", "time"] = "dist",
-    assume_symmetric: bool = False,
+    od_path: Path,
+    value: str = "dist",          # "dist" or "time"
+    assume_symmetric: bool = False
 ) -> Dict[Tuple[int, int], float]:
-    """
-    파일 규칙:
-      - 맨 앞 컬럼 = route type (무시)
-      - 뒤에서 4개 컬럼: origin, destination, dist, time
-      - 동일 (origin, destination) 중복 시: 마지막 값 overwrite
-    """
-    od_dir = Path(od_dir)
-    if not od_dir.exists():
-        raise FileNotFoundError(f"OD directory not found: {od_dir}")
 
     od: Dict[Tuple[int, int], float] = {}
+    if not od_path.exists():
+        return od
 
-    for fpath in sorted(od_dir.iterdir()):
-        if not fpath.is_file():
-            continue
+    with od_path.open("r", encoding="utf-8", errors="ignore") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            # header line can appear mid-file
+            if "Origin ID" in line or "Route Type" in line:
+                continue
 
-        with fpath.open("r", encoding="utf-8", errors="ignore") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line:
-                    continue
-                parts = [p.strip() for p in line.split(",")]
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 4:
+                continue
 
-                if len(parts) < 4:
-                    continue
-                try:
-                    origin = int(parts[-4])
-                    dest = int(parts[-3])
-                    time = float(parts[-2])
-                    dist = float(parts[-1])
+            # robust parsing from tail
+            try:
+                origin = int(parts[-4])
+                dest   = int(parts[-3])
+                time_s = float(parts[-2])
+                dist_c = float(parts[-1])
+            except ValueError:
+                continue
 
-                except ValueError:
-                    continue
+            # dist can be missing in some lines (empty string -> ValueError already handled)
+            if value == "dist":
+                v = dist_c
+            else:
+                v = time_s
 
-                v = dist if value == "dist" else time
-                od[(origin, dest)] = v
-                if assume_symmetric:
-                    od[(dest, origin)] = v
+            if not math.isfinite(v):
+                continue
+
+            od[(origin, dest)] = v
+            if assume_symmetric:
+                od[(dest, origin)] = v
 
     return od
+
 
 def build_k_neighborhood(
     ids: List[int],
@@ -300,7 +299,7 @@ def solve_formulation(
     w2: float = 1.0,
     time_limit: Optional[int] = 600,
     mip_gap: Optional[float] = 0.0,
-    k_neigh: int = 10,
+    k_neigh: int = 100,
 ):
 
     WEEKS_local = list(range(1, timecycle + 1))
@@ -478,10 +477,11 @@ def main():
     stops, Pi, baseline_sched = build_stops_and_pi(aggr, pools, darules_map)
 
     n = len(stops)
+    K_NEIGH = max(10, int(0.3 * n))
     C_MAX = int(round(max_pct / 100.0 * n))
 
     # 4) distances (Euclidean)
-    Ddist = load_od_matrix(Path('od_info'))
+    Ddist = load_od_matrix(Path(f"{DATA_SET}/od.txt"))
 
     # 5) solve (new objective formulation)
     model, chosen_tuple, changed = solve_formulation(stops=stops, pi=Pi, baseline_sched=baseline_sched,

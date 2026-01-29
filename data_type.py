@@ -5,6 +5,7 @@ from dataclasses import dataclass
 # Constants
 DAYS_5 = ["MON", "TUE", "WED", "THU", "FRI"]
 ALL_DAYS_7 = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+Cell = Tuple[int, str]  # (week, day)
 
 DAY_MAP_MIN = {
     "MONDAY": "MON", "TUESDAY": "TUE", "WEDNESDAY": "WED",

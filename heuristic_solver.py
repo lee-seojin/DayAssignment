@@ -5,15 +5,20 @@ from typing import Dict, Tuple
 import time
 import csv
 from datetime import datetime
+import pickle
 
 from helper_funcs import compute_V, make_run_prefix
-from heuristic_aggr import load_artifacts, DATA_SET
 from heuristic_phase1 import phase_1
 from heuristic_phase2 import phase_2
 from data_type import Stop, SchedTuple
 from heuristic_objective import compute_objective
 
 W1, W2 = 1.0, 1.0
+DATA_SET = "1027633" #"1042199"
+
+def load_artifacts(pkl_path: Path) -> dict:
+    with pkl_path.open("rb") as f:
+        return pickle.load(f)
 
 def _weektuple_to_str(weekt: Tuple[int, ...]) -> str:
     # (1,3,4) -> "1,3,4"
@@ -38,7 +43,10 @@ def save_heuristic_onefile_csv(
         "Execution Time(s)",
         "w1",
         "w2",
+        "kNN_k",
+        "Objective_kNN",
     ]
+
     meta_values = [
         meta["date"],
         meta["dataset"],
@@ -46,6 +54,8 @@ def save_heuristic_onefile_csv(
         meta["exec_time_s"],
         meta["w1"],
         meta["w2"],
+        meta["k"],
+        meta["obj_knn"],
     ]
 
     # ===== stop table header =====
@@ -111,7 +121,6 @@ def main():
     p, changed, C_used = phase_2(artifacts, p, changed, C_used, clusters, nucleus)
 
     obj = compute_objective(artifacts, p, w1=W1, w2=W2)
-    print(f"[OBJ] total={obj['obj']:.6f}")
 
     end_time = time.perf_counter()
     elapsed = end_time - start_time
@@ -128,6 +137,8 @@ def main():
         "exec_time_s": float(elapsed),
         "w1": W1,
         "w2": W2,
+        "k": int(obj["k"]),
+        "obj_knn": float(obj["obj_knn"])
     }
 
     save_heuristic_onefile_csv(

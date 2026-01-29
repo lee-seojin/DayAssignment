@@ -3,12 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Iterable, Literal, Tuple
 from data_type import SchedTuple, WeekTuple, DayBits, ALL_DAYS_7, KEY_COLS, TuplePools, DAY_MAP_MIN, ScheduleView, Stop
+from heuristic_solver import DATA_SET
 import itertools
 import pickle
+import math
 
 import pandas as pd
-
-DATA_SET = "1027633"
 
 # loading params.txt
 def load_params(params_path: Path) -> dict:
@@ -213,42 +213,49 @@ def build_priority_map(
 
 # OD loader
 def load_od_matrix(
-    od_dir: Path,
-    value: Literal["dist", "time"] = "dist",
-    assume_symmetric: bool = False,
+    od_path: Path,
+    value: str = "dist",          # "dist" or "time"
+    assume_symmetric: bool = False
 ) -> Dict[Tuple[int, int], float]:
 
-    od_dir = Path(od_dir)
-    if not od_dir.exists():
-        raise FileNotFoundError(f"OD directory not found: {od_dir}")
-
     od: Dict[Tuple[int, int], float] = {}
+    if not od_path.exists():
+        return od
 
-    for fpath in sorted(od_dir.iterdir()):
-        if not fpath.is_file():
-            continue
-        with fpath.open("r", encoding="utf-8", errors="ignore") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line:
-                    continue
+    with od_path.open("r", encoding="utf-8", errors="ignore") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            # header line can appear mid-file
+            if "Origin ID" in line or "Route Type" in line:
+                continue
 
-                parts = [p.strip() for p in line.split(",")]
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 4:
+                continue
 
-                if len(parts) < 4:
-                    continue
-                try:
-                    origin = int(parts[-4])
-                    dest = int(parts[-3])
-                    dist = float(parts[-2])
-                    t = float(parts[-1])
-                except ValueError:
-                    continue
+            # robust parsing from tail
+            try:
+                origin = int(parts[-4])
+                dest   = int(parts[-3])
+                time_s = float(parts[-2])
+                dist_c = float(parts[-1])
+            except ValueError:
+                continue
 
-                v = dist if value == "dist" else t
-                od[(origin, dest)] = v
-                if assume_symmetric:
-                    od[(dest, origin)] = v
+            # dist can be missing in some lines (empty string -> ValueError already handled)
+            if value == "dist":
+                v = dist_c
+            else:
+                v = time_s
+
+            if not math.isfinite(v):
+                continue
+
+            od[(origin, dest)] = v
+            if assume_symmetric:
+                od[(dest, origin)] = v
 
     return od
 
@@ -260,10 +267,6 @@ def save_artifacts(out_dir: Path, artifacts: dict) -> Path:
     with pkl_path.open("wb") as f:
         pickle.dump(artifacts, f, protocol=pickle.HIGHEST_PROTOCOL)
     return pkl_path
-
-def load_artifacts(pkl_path: Path) -> dict:
-    with pkl_path.open("rb") as f:
-        return pickle.load(f)
 
 
 # main builder
@@ -323,7 +326,7 @@ def build_inputs_and_cache(
 if __name__ == "__main__":
 
     PARAMS_PATH = Path(f"{DATA_SET}/params.txt")
-    OD_DIR = Path("od_info")
+    OD_DIR = Path(f"{DATA_SET}/od.txt")
     OUT_DIR = Path("baseline_data_store")
 
     build_inputs_and_cache(PARAMS_PATH, OD_DIR, OUT_DIR)

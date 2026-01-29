@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Dict, Tuple, List
 from data_type import Stop, SchedTuple
 from helper_funcs import WEEKS, DAYS_5, a, get_dist
-
+from optimal_solver import build_k_neighborhood
 
 Cell = Tuple[int, str]  # (l, d)
 
@@ -65,16 +65,102 @@ def density_term_w(stops: Dict[int, Stop],
 
     return total
 
-def compute_objective(artifacts: dict,
-                      p: Dict[int, SchedTuple],
-                      w1: float = 1.0,
-                      w2: float = 1.0) -> Dict[str, float]:
+def density_term_w_knn(
+    stops: Dict[int, Stop],
+    p: Dict[int, SchedTuple],
+    Ddist: Dict[Tuple[int, int], float],
+    neigh: Dict[int, List[int]],
+) -> float:
+    total = 0.0
+
+    visited_by_cell: Dict[Cell, List[int]] = {(l, d): [] for l in WEEKS for d in DAYS_5}
+    for i in stops.keys():
+        sched = p[i]
+        for l in WEEKS:
+            for d in DAYS_5:
+                if a(sched, l, d) == 1:
+                    visited_by_cell[(l, d)].append(i)
+
+    for (l, d), ids in visited_by_cell.items():
+        if len(ids) <= 1:
+            continue
+        ids_set = set(ids)
+
+        for i in ids:
+            best = float("inf")
+            # 후보 = kNN 중에서 같은 cell에 있는 애들만
+            for j in neigh[i]:
+                if j == i:
+                    continue
+                if j not in ids_set:
+                    continue
+                dij = get_dist(i, j, Ddist, stops)
+                if dij < best:
+                    best = dij
+
+            # 후보가 비면? → MIP에서는 이런 상황이 생기면 모델이 이상해짐.
+            # 현실적으로는 k를 충분히 키우면 거의 없어짐.
+            if best == float("inf"):
+                # fallback: full-min으로 안전하게 처리(또는 큰 페널티)
+                for j in ids:
+                    if j == i:
+                        continue
+                    dij = get_dist(i, j, Ddist, stops)
+                    if dij < best:
+                        best = dij
+
+            total += best
+
+    return total
+
+
+def compute_objective(
+    artifacts: dict,
+    p: Dict[int, SchedTuple],
+    w1: float = 1.0,
+    w2: float = 1.0,
+) -> Dict[str, float]:
 
     stops: Dict[int, Stop] = artifacts["stops"]
     Ddist: Dict[Tuple[int, int], float] = artifacts["Ddist"]
 
+    # volume balance (공통)
     V = compute_V_cell(stops, p)
-    w_term = density_term_w(stops, p, Ddist)
     vbal = volume_balance_term(V)
-    obj = w1 * w_term + w2 * vbal
-    return {"obj": obj, "density": w_term, "vol_balance": vbal}
+
+    # full density
+    w_full = density_term_w(stops, p, Ddist)
+    obj_full = w1 * w_full + w2 * vbal
+
+    # knn density
+    knn_ratio: float = 0.3
+    n = len(stops)
+    k = int(knn_ratio * n)
+    neigh = build_k_neighborhood(list(stops.keys()), Ddist, stops, k=k)
+
+    w_knn = density_term_w_knn(stops, p, Ddist, neigh)
+    obj_knn = w1 * w_knn + w2 * vbal
+
+    print("[Objective scored by heuristic_objective]")
+    print(f"[FULL] density      = {w_full:.6f}")
+    print(f"[FULL] vol_balance  = {vbal:.6f}")
+    print(f"[FULL] TOTAL        = {obj_full:.6f}")
+
+    """
+    print(f"[kNN ] k={k} (ratio={knn_ratio:.2f})")
+    print(f"[kNN ] density      = {w_knn:.6f}")
+    print(f"[kNN ] vol_balance  = {vbal:.6f}")
+    print(f"[kNN ] TOTAL        = {obj_knn:.6f}")
+    """
+
+    return {
+        "obj": obj_full,
+        "density": w_full,
+        "vol_balance": vbal,
+
+        "k": float(k),
+        "knn_ratio": float(knn_ratio),
+        "obj_knn": obj_knn,
+        "density_knn": w_knn,
+        "vol_balance_knn": vbal,   # 동일하지만 비교 편의상 넣어둠
+    }
