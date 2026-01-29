@@ -1,248 +1,294 @@
 from __future__ import annotations
 from typing import Dict, Tuple, List, Optional
-import os
 import matplotlib.pyplot as plt
-from typing import Dict, Tuple
-from data_type import WEEKS, DAYS_5
+import numpy as np
 
-from data_type import Stop, SchedTuple, WEEKS, DAYS_5, Cell
-from helper_funcs import a, compute_V, try_apply_change
+from data_type import Stop, SchedTuple, Cell
+from helper_funcs import WEEKS, DAYS_5, a, get_dist, try_apply_change
 
-def _cells_toggled(old_sched: SchedTuple, new_sched: SchedTuple) -> List[Tuple[int, str, int]]:
-    """
-    old->new로 바꿀 때 방문 여부가 달라지는 셀들만 반환.
-    각 원소: (l, d, delta_visit) where delta_visit ∈ {-1, +1}
-    """
-    out: List[Tuple[int, str, int]] = []
+
+# Volume utilities
+def compute_V_cell(stops: Dict[int, Stop], p: Dict[int, SchedTuple]) -> Dict[Cell, float]:
+    V = {(l, d): 0.0 for l in WEEKS for d in DAYS_5}
+    for sid, s in stops.items():
+        vol = float(s.volume)
+        sched = p[sid]
+        for l in WEEKS:
+            for d in DAYS_5:
+                if a(sched, l, d):
+                    V[(l, d)] += vol
+    return V
+
+
+def volume_balance_term(V: Dict[Cell, float]) -> float:
+    tot = 0.0
     for l in WEEKS:
-        for d in DAYS_5:
-            old = a(old_sched, l, d)
-            new = a(new_sched, l, d)
-            if old != new:
-                out.append((l, d, new - old))
-    return out
+        vals = [V[(l, d)] for d in DAYS_5]
+        tot += max(vals) - min(vals)
+    return tot
 
 
-def _apply_delta_to_V(
+def pick_week_with_max_imbalance(V: Dict[Cell, float]) -> int:
+    return max(
+        WEEKS,
+        key=lambda l: max(V[(l, d)] for d in DAYS_5) - min(V[(l, d)] for d in DAYS_5)
+    )
+
+
+def pick_high_low_days(V: Dict[Cell, float], l: int) -> Tuple[str, str]:
+    d_high = max(DAYS_5, key=lambda d: V[(l, d)])
+    d_low = min(DAYS_5, key=lambda d: V[(l, d)])
+    return d_high, d_low
+
+
+
+# Density utilities (exact, local)
+def build_visited_by_cell(stops: Dict[int, Stop], p: Dict[int, SchedTuple]) -> Dict[Cell, List[int]]:
+    visited = {(l, d): [] for l in WEEKS for d in DAYS_5}
+    for sid in stops:
+        sched = p[sid]
+        for l in WEEKS:
+            for d in DAYS_5:
+                if a(sched, l, d):
+                    visited[(l, d)].append(sid)
+    return visited
+
+
+def cells_of_sched(s: SchedTuple) -> List[Cell]:
+    return [(l, d) for l in WEEKS for d in DAYS_5 if a(s, l, d)]
+
+
+def cell_density(ids: List[int], stops: Dict[int, Stop], Ddist) -> float:
+    if len(ids) <= 1:
+        return 0.0
+    tot = 0.0
+    for i in ids:
+        best = float("inf")
+        for j in ids:
+            if i == j:
+                continue
+            d = get_dist(i, j, Ddist, stops)
+            if d < best:
+                best = d
+        tot += best
+    return tot
+
+
+def delta_density(
+    sid: int,
+    old_sched: SchedTuple,
+    new_sched: SchedTuple,
+    visited: Dict[Cell, List[int]],
+    stops: Dict[int, Stop],
+    Ddist,
+) -> float:
+    old_cells = set(cells_of_sched(old_sched))
+    new_cells = set(cells_of_sched(new_sched))
+    affected = old_cells ^ new_cells
+
+    delta = 0.0
+    for cell in affected:
+        before_ids = visited[cell]
+        if cell in old_cells and cell not in new_cells:
+            after_ids = [x for x in before_ids if x != sid]
+        else:
+            after_ids = before_ids + [sid]
+
+        delta += cell_density(after_ids, stops, Ddist)
+        delta -= cell_density(before_ids, stops, Ddist)
+
+    return delta
+
+
+def apply_to_visited(
+    sid: int,
+    old_sched: SchedTuple,
+    new_sched: SchedTuple,
+    visited: Dict[Cell, List[int]],
+):
+    old_cells = set(cells_of_sched(old_sched))
+    new_cells = set(cells_of_sched(new_sched))
+
+    for cell in old_cells - new_cells:
+        visited[cell].remove(sid)
+    for cell in new_cells - old_cells:
+        visited[cell].append(sid)
+
+
+# Heatmap
+def plot_heatmap(
     V: Dict[Cell, float],
-    delta_cells: List[Tuple[int, str, int]],
-    vol: float,
-    sign: int,
-) -> None:
-    """
-    sign=+1이면 delta 적용, sign=-1이면 rollback.
-    """
-    for l, d, dv in delta_cells:
-        V[(l, d)] += sign * dv * vol
-
-def _range_metric(V: Dict[Cell, float]) -> float:
-    # range와 동시에 0 셀 개수 줄이기
-    vals = list(V.values())
-    mu = sum(vals) / len(vals)
-    return sum(abs(v - mu) for v in vals)
-
-def _argmax_cell(V: Dict[Cell, float]) -> Cell:
-    return max(V.keys(), key=lambda k: V[k])
-
-
-def _argmin_cell(V: Dict[Cell, float]) -> Cell:
-    return min(V.keys(), key=lambda k: V[k])
-
-
-def _filter_options_with_locks(
-    stop: Stop,
-    options: List[SchedTuple],
-    baseline_sched: Dict[int, SchedTuple],
-    stop_id: int,
-) -> List[SchedTuple]:
-    """
-    baseline 기준 lock 반영
-    - dowlockcd==1: daybits 고정 (baseline daybits만 허용)
-    - wccd_flag==1: weektuple 고정 (baseline weektuple만 허용)
-    """
-    base_w, base_d = baseline_sched[stop_id]
-
-    out = options
-    if stop.dowlockcd == 1:
-        out = [s for s in out if s[1] == base_d]
-    if stop.wccd_flag == 1:
-        out = [s for s in out if s[0] == base_w]
-    return out
-
-
-def save_calendar_heatmap(
-    V: Dict[Cell, float],
-    tag: str,
-    out_dir: str = "phase2_heatmaps",
-) -> None:
-    """
-    4주 x 5일 달력형 heatmap 저장
-    """
-    os.makedirs(out_dir, exist_ok=True)
-
-    grid = [[V[(l, d)] for d in DAYS_5] for l in WEEKS]
-
-    fig, ax = plt.subplots()
-    im = ax.imshow(grid)
-
-    ax.set_xticks(range(len(DAYS_5)))
-    ax.set_xticklabels(DAYS_5)
-    ax.set_yticks(range(len(WEEKS)))
-    ax.set_yticklabels([f"W{l}" for l in WEEKS])
-
+    title: str,
+    savepath: Optional[str] = None,
+):
+    mat = np.zeros((len(WEEKS), len(DAYS_5)))
     for i, l in enumerate(WEEKS):
         for j, d in enumerate(DAYS_5):
-            ax.text(j, i, f"{grid[i][j]:.0f}", ha="center", va="center", fontsize=8)
+            mat[i, j] = V[(l, d)]
 
-    ax.set_title(tag)
-    fig.colorbar(im, ax=ax)
+    plt.figure(figsize=(8, 5))
+    plt.imshow(mat, cmap="hot", aspect="auto")
+    plt.colorbar(label="Volume")
+    plt.xticks(range(len(DAYS_5)), DAYS_5)
+    plt.yticks(range(len(WEEKS)), WEEKS)
+    plt.title(title)
 
-    fname = f"{tag}.png".replace(" ", "_")
-    fig.savefig(os.path.join(out_dir, fname), bbox_inches="tight")
-    plt.close(fig)
+    if savepath:
+        plt.savefig(savepath, bbox_inches="tight")
+        plt.close()
+    else:
+        plt.show()
 
 
+# Density-aware Phase 2
 def phase_2(
     artifacts: dict,
     p: Dict[int, SchedTuple],
     changed: Dict[int, int],
     C_used: int,
-    clusters: Dict[int, List[int]],   # 안 쓰지만 시그니처 유지
-    nucleus: Dict[int, int],
+    *,
+    max_iters: int = 500,
+    patience: int = 30,
+    max_candidates: int = 300,
+    heatmap_prefix: Optional[str] = None,
 ) -> Tuple[Dict[int, SchedTuple], Dict[int, int], int]:
-    """
-    max(V)-min(V) (range)만 직접 줄이는 greedy relocate.
-    - 매 iteration마다 현재 V를 보고 max cell / min cell 갭을 줄이는 move를 찾음
-    - to_cell을 고정하지 않음: stop이 갈 수 있는 feasible schedule 중 range를 가장 줄이는 걸 선택
-    - lock/dowcd/freq/sched_cache 기반 feasible schedule만 사용
-    """
 
     stops: Dict[int, Stop] = artifacts["stops"]
-    baseline_sched: Dict[int, SchedTuple] = artifacts["baseline_sched"]
-    sched_cache: Dict[Tuple[str, int], List[SchedTuple]] = artifacts["sched_cache"]
-    C_max: int = int(artifacts["C_max"])
+    Ddist = artifacts["Ddist"]
+    baseline = artifacts["baseline_sched"]
+    sched_cache = artifacts["sched_cache"]
+    priority_map = artifacts["priority_map"]
+    C_max = int(artifacts["C_max"])
 
-    # 튜닝 파라미터 (원하는 만큼 올릴 수 있음)
-    max_iters = 2000
-    max_stop_candidates = 400         # max cell에 있는 stop들 중 상위 N개만 보자 (너무 크면 느려짐)
+    V = compute_V_cell(stops, p)
+    visited = build_visited_by_cell(stops, p)
+    cur_vbal = volume_balance_term(V)
 
-    # 초기 V
-    V = compute_V(stops, p)
-    save_calendar_heatmap(V, tag="phase2_start")
-    cur_metric = _range_metric(V)
+    eps_density = 10000.0  # density 악화 허용 상한
+    K_low_days = 3  # to_cell 후보 개수
+    min_vol_improve = 1e-6  # volume 개선 최소 기준
 
-    # max cell에 있는 stop들 추출
-    def stops_in_cell(cell: Cell) -> List[int]:
-        l, d = cell
-        return [sid for sid in stops.keys() if a(p[sid], l, d) == 1]
-
-    # stop 우선순위: 자유도(후보 많음) + 효과(볼륨 큼)로 정렬
-    def stop_priority_key(sid: int, opt_count: int) -> Tuple[int, float, int]:
-        # opt_count 클수록 우선, volume 클수록 우선
-        return (-opt_count, -float(stops[sid].volume), sid)
+    # order by flexibility then volume
+    all_ids = sorted(
+        stops.keys(),
+        key=lambda sid: (priority_map.get((stops[sid].dowcd, stops[sid].frequency), 999),
+                         -float(stops[sid].volume))
+    )
 
     no_improve = 0
-    patience = 200  # 이만큼 연속으로 개선 없으면 종료
 
     for it in range(max_iters):
-        max_cell = _argmax_cell(V)
+        l0 = pick_week_with_max_imbalance(V)
 
-        # max cell에 있는 stop 후보들
-        cand_ids = stops_in_cell(max_cell)
+        # from_cell: 가장 volume 큰 day
+        d_high = max(DAYS_5, key=lambda d: V[(l0, d)])
+        from_cell = (l0, d_high)
 
-        # 각 stop의 feasible option 개수를 빠르게 계산해서 우선순위 정렬
-        scored_ids: List[Tuple[int, int]] = []
-        for sid in cand_ids:
-            s = stops[sid]
-            key = (s.dowcd, s.frequency)
-            options = sched_cache.get(key, [])
-            # old_sched 포함
-            old_sched = p[sid]
-            if old_sched not in options:
-                options = options + [old_sched]
-            options = _filter_options_with_locks(s, options, baseline_sched, sid)
-            scored_ids.append((sid, len(options)))
+        # to_cell 후보: volume 작은 day 상위 K개
+        low_days = sorted(DAYS_5, key=lambda d: V[(l0, d)])[:K_low_days]
+        to_cells = [(l0, d) for d in low_days]
 
-        scored_ids.sort(key=lambda x: stop_priority_key(x[0], x[1]))
-        cand_ids = [sid for sid, _ in scored_ids[:max_stop_candidates]]
-
-        best_move: Optional[Tuple[int, SchedTuple, float]] = None  # (sid, new_sched, new_metric)
-
-        # move 탐색
-        for sid in cand_ids:
-            s = stops[sid]
-            vol = float(s.volume)
-            old_sched = p[sid]
-
-            # feasible schedules
-            key = (s.dowcd, s.frequency)
-            options = sched_cache.get(key, [])
-            if old_sched not in options:
-                options = options + [old_sched]
-            options = _filter_options_with_locks(s, options, baseline_sched, sid)
-
-            # delta를 미리 계산해두면 빠름
-            for new_sched in options:
-                if new_sched == old_sched:
-                    continue
-
-                # budget check
-                before_c = changed.get(sid, 0)
-                after_c = 1 if new_sched != baseline_sched[sid] else 0
-                if (C_used - before_c + after_c) > C_max:
-                    continue
-
-                # 실제로 max_cell에서 빠지지 않으면 의미 없음(최소 조건)
-                lmax, dmax = max_cell
-                if a(new_sched, lmax, dmax) != 0:
-                    continue
-
-                delta_cells = _cells_toggled(old_sched, new_sched)
-                if not delta_cells:
-                    continue
-
-                # V에 임시 적용 → metric 평가 → rollback
-                _apply_delta_to_V(V, delta_cells, vol, sign=+1)
-                new_metric = _range_metric(V)
-                _apply_delta_to_V(V, delta_cells, vol, sign=-1)
-
-                if new_metric < cur_metric:
-                    if best_move is None or new_metric < best_move[2]:
-                        best_move = (sid, new_sched, new_metric)
-
-        # 개선 move 없으면 종료 또는 계속
-        if best_move is None:
+        from_ids = visited[from_cell]
+        if len(from_ids) <= 1:
             no_improve += 1
             if no_improve >= patience:
                 break
             continue
 
-        # best move 적용
-        sid, new_sched, new_metric = best_move
+        candidates = [sid for sid in all_ids if sid in from_ids][:max_candidates]
+        best = None
+        # (sid, new_sched, delta_vbal, delta_den, newV)
+
+        for sid in candidates:
+            stop = stops[sid]
+            old_sched = p[sid]
+            vol = float(stop.volume)
+
+            scheds = sched_cache[(stop.dowcd, stop.frequency)]
+            if old_sched not in scheds:
+                scheds = scheds + [old_sched]
+
+            bw, bd = baseline[sid]
+            if stop.dowlockcd:
+                scheds = [s for s in scheds if s[1] == bd]
+            if stop.wccd_flag:
+                scheds = [s for s in scheds if s[0] == bw]
+
+            for new_sched in scheds:
+                if new_sched == old_sched:
+                    continue
+                if not a(old_sched, *from_cell):
+                    continue
+                if a(new_sched, *from_cell):
+                    continue
+
+                for to_cell in to_cells:
+                    if not a(new_sched, *to_cell):
+                        continue
+
+                    # budget check
+                    before = changed[sid]
+                    after = 1 if new_sched != baseline[sid] else 0
+                    if C_used - before + after > C_max:
+                        continue
+
+                    # volume update
+                    newV = dict(V)
+                    newV[from_cell] -= vol
+                    newV[to_cell] += vol
+                    new_vbal = volume_balance_term(newV)
+                    delta_vbal = new_vbal - cur_vbal
+                    if delta_vbal >= -min_vol_improve:
+                        continue
+
+                    # density delta (local exact)
+                    delta_den = delta_density(
+                        sid, old_sched, new_sched,
+                        visited, stops, Ddist
+                    )
+                    if delta_den > eps_density:
+                        continue
+
+                    # 선택 기준:
+                    # 1) volume 더 많이 개선
+                    # 2) density 덜 악화
+                    if best is None:
+                        best = (sid, new_sched, delta_vbal, delta_den, newV)
+                    else:
+                        _, _, bv, bd, _ = best
+                        if (delta_vbal < bv) or (
+                                abs(delta_vbal - bv) < 1e-9 and delta_den < bd
+                        ):
+                            best = (sid, new_sched, delta_vbal, delta_den, newV)
+
+        if best is None:
+            no_improve += 1
+            if no_improve >= patience:
+                break
+            continue
+
+        # apply best move
+        sid, new_sched, delta_vbal, delta_den, newV = best
+        old_sched = p[sid]
+
         ok, C_used2 = try_apply_change(
             stop_id=sid,
             stops=stops,
             new_sched=new_sched,
             p=p,
-            baseline_sched=baseline_sched,
+            baseline_sched=baseline,
             changed=changed,
             C_used=C_used,
             C_max=C_max,
         )
         if not ok:
-            # 이론상 여기까지 오면 거의 ok여야 하는데, 그래도 안전하게 처리
             no_improve += 1
-            if no_improve >= patience:
-                break
             continue
 
         C_used = C_used2
-        V = compute_V(stops, p)
-        cur_metric = _range_metric(V)
+        V = newV
+        cur_vbal = volume_balance_term(V)
+        apply_to_visited(sid, old_sched, new_sched, visited)
         no_improve = 0
-
-        save_calendar_heatmap(V, tag=f"iter_{it}_metric_{cur_metric:.0f}")
-
-    save_calendar_heatmap(V, tag="phase2_final")
 
     return p, changed, C_used

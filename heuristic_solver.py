@@ -118,9 +118,12 @@ def main():
 
     # Phase 1, 2: clustering & relocation
     clusters, nucleus, p, changed, C_used = phase_1(artifacts, p, changed, C_used)
-    p, changed, C_used = phase_2(artifacts, p, changed, C_used, clusters, nucleus)
+    p, changed, C_used = phase_2(artifacts, p, changed, C_used)
 
+    print("[Objective scored by heuristic_objective]")
     obj = compute_objective(artifacts, p, w1=W1, w2=W2)
+    print("[Baseline Objective]")
+    baseline_obj = compute_objective(artifacts, baseline_sched, W1, W2)
 
     end_time = time.perf_counter()
     elapsed = end_time - start_time

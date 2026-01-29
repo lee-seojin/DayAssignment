@@ -1,157 +1,140 @@
 from __future__ import annotations
-from collections import defaultdict
-from typing import Dict, List, Tuple, Set, Optional
-import numpy as np
-from sklearn.cluster import DBSCAN
-from data_type import Stop, DayBits, SchedTuple, WeekTuple, ScheduleView
-from helper_funcs import get_dist, try_apply_change
+
+from typing import Dict, List, Tuple, Optional
+
+from data_type import Stop, SchedTuple, Cell
+from helper_funcs import WEEKS, DAYS_5, a, get_dist, try_apply_change
 
 def build_priority_groups(
     stops: Dict[int, Stop],
     priority_map: Dict[Tuple[str, int], int],
 ) -> Dict[int, List[int]]:
-    # return: priority_groups[p] = [stop_id1, stop_id2, ...] - stop_id list는 (freq, stop_id) 기준으로 정렬됨
-
-    groups = defaultdict(list)
-    for stop_id, s in stops.items():
-        key = (s.dowcd, s.frequency)
-        pr = priority_map.get(key)
+    groups: Dict[int, List[int]] = {}
+    for sid, s in stops.items():
+        pr = priority_map.get((s.dowcd, s.frequency))
         if pr is None:
             continue
-        groups[pr].append(stop_id)
-
-    # 각 priority 그룹 내부 정렬 - 매번 같은 리스트가 생성되도록
-    for pr, ids in groups.items():
-        ids.sort(key=lambda i: (stops[i].frequency, i))
-
-    return dict(groups)
+        groups.setdefault(pr, []).append(sid)
+    for pr in groups:
+        groups[pr].sort(key=lambda i: (stops[i].frequency, i))
+    return groups
 
 
-def dbscan(
+def visited_by_cell(stops: Dict[int, Stop], p: Dict[int, SchedTuple]) -> Dict[Cell, List[int]]:
+    out: Dict[Cell, List[int]] = {(l, d): [] for l in WEEKS for d in DAYS_5}
+    for sid in stops:
+        sched = p[sid]
+        for l in WEEKS:
+            for d in DAYS_5:
+                if a(sched, l, d) == 1:
+                    out[(l, d)].append(sid)
+    return out
+
+
+def stop_cells(sched: SchedTuple) -> List[Cell]:
+    cells: List[Cell] = []
+    for l in WEEKS:
+        for d in DAYS_5:
+            if a(sched, l, d) == 1:
+                cells.append((l, d))
+    return cells
+
+
+def filter_candidates_by_locks(
+    sid: int,
+    stop: Stop,
+    candidates: List[SchedTuple],
+    baseline_sched: Dict[int, SchedTuple],
+) -> List[SchedTuple]:
+    base_w, base_d = baseline_sched[sid]
+    out = candidates
+    if getattr(stop, "dowlockcd", 0) == 1:
+        out = [s for s in out if s[1] == base_d]
+    if getattr(stop, "wccd_flag", 0) == 1:
+        out = [s for s in out if s[0] == base_w]
+    return out
+
+
+def min_dist_to_set(
+    sid: int,
+    targets: List[int],
+    stops: Dict[int, Stop],
+    Ddist: Dict[Tuple[int, int], float],
+) -> float:
+    """min_j dist(sid, j). targets empty -> +inf"""
+    if not targets:
+        return float("inf")
+    best = float("inf")
+    for j in targets:
+        if j == sid:
+            continue
+        d = get_dist(sid, j, Ddist, stops)
+        if d < best:
+            best = d
+    return best
+
+
+def core_proxy_cost_for_sched(
+    sid: int,
+    sched: SchedTuple,
+    core_by_cell: Dict[Cell, List[int]],
+    visited_by_cell_current: Dict[Cell, List[int]],
+    stops: Dict[int, Stop],
+    Ddist: Dict[Tuple[int, int], float],
+    empty_cell_penalty: float = 1e3,
+) -> float:
+    """
+    proxy cost = sum over visited cells:
+      - if core exists in that cell: min dist to that cell's core
+      - else: min dist to existing stops in that cell (so we don't jump into isolation)
+      - if even that cell is empty: empty_cell_penalty
+    """
+    cost = 0.0
+    for cell in stop_cells(sched):
+        cores = core_by_cell.get(cell, [])
+        if cores:
+            dmin = min_dist_to_set(sid, cores, stops, Ddist)
+            cost += dmin
+            continue
+
+        # core 없는 셀: 그 셀에 이미 있는 방문자들에 붙는 비용 사용
+        members = visited_by_cell_current.get(cell, [])
+        dmin2 = min_dist_to_set(sid, members, stops, Ddist)
+        if dmin2 == float("inf"):
+            cost += empty_cell_penalty
+        else:
+            cost += dmin2
+
+    return cost
+
+
+def choose_outliers_in_cell(
+    ids: List[int],
     core_ids: List[int],
     stops: Dict[int, Stop],
     Ddist: Dict[Tuple[int, int], float],
-    eps: float,
-    min_pts: int,
-) -> Tuple[Dict[int, List[int]], Set[int]]:
-
-    n = len(core_ids)
-    if n == 1:
-        return {0: [core_ids[0]]}, set()
-
-    # precomputed distance matrix
-    dist = np.zeros((n, n), dtype=float)
-    for a in range(n):
-        i = core_ids[a]
-        for b in range(a+1, n):
-            if a == b:
-                continue
-            j = core_ids[b]
-            dist[a, b] = get_dist(i, j, Ddist, stops)
-            dist[b, a] = get_dist(j, i, Ddist, stops)
-
-    model = DBSCAN(eps=eps, min_samples=min_pts, metric="precomputed")
-    labels = model.fit_predict(dist)
-
-    clusters: Dict[int, List[int]] = {}
-    noise: Set[int] = set()
-
-    # sklearn label: -1 = noise, else cluster id
-    for idx, label in enumerate(labels):
-        stop_id = core_ids[idx]
-        if label == -1:
-            noise.add(stop_id)
-        else:
-            clusters.setdefault(int(label), []).append(stop_id)
-
-    return clusters, noise
-
-
-def choose_nucleus(
-    members: List[int],
-    stops: Dict[int, Stop],
-    Ddist: Dict[Tuple[int, int], float],
-) -> int:
-    # nucleus = medoid (클러스터 내부 거리합 최소 stop)
-    if len(members) == 1:
-        return members[0]
-
-    best = members[0]
-    best_sum = float("inf")
-
-    for i in members:
-        s = 0.0
-        for j in members:
-            if i == j:
-                continue
-            s += get_dist(i, j, Ddist, stops)
-        if s < best_sum:
-            best_sum = s
-            best = i
-
-    return best
-
-def nearest_k_nuclei(
-    stop_id: int,
-    nucleus: Dict[int, int],  # cid -> nucleus stop_id
-    stops: Dict[int, Stop],
-    Ddist: Dict[Tuple[int, int], float],
-    k: int,
+    top_ratio: float,
 ) -> List[int]:
+    """
+    Rank by distance-to-nearest-core (bigger = more outlier).
+    Return top_ratio portion (at least 1).
+    """
+    if not ids or not core_ids:
+        return []
 
-    dlist = []
-    for cid, nuc_id in nucleus.items():
-        d = get_dist(stop_id, nuc_id, Ddist, stops)
-        dlist.append((d, cid))
-
-    dlist.sort(key=lambda x: x[0])
-    return [cid for _, cid in dlist[:k]]
-
-def overlap_score(core: DayBits, cand: DayBits, alpha: float = 0.2) -> float:
-    overlap = 0
-    extra = 0
-
-    for k in range(7):
-        if core[k] == 1 and cand[k] == 1:
-            overlap += 1
-        elif core[k] == 0 and cand[k] == 1:
-            extra += 1
-
-    return overlap - alpha * extra
-
-def choose_best_sched(
-    candidates: List[SchedTuple],
-    core_week: WeekTuple,
-    core_day: DayBits,
-    alpha: float,
-) -> Optional[SchedTuple]:
-    if not candidates:
-        return None
-
-    # day 겹침 최우선
     scored = []
-    best_day = -1e18
-    for (w, d) in candidates:
-        day_score = overlap_score(core_day, d, alpha=alpha)
-        if day_score > best_day:
-            best_day = day_score
-        scored.append((w, d, day_score))
+    for sid in ids:
+        # core stop itself is not a target to move
+        if sid in core_ids:
+            continue
+        d = min_dist_to_set(sid, core_ids, stops, Ddist)
+        scored.append((d, sid))
+    if not scored:
+        return []
 
-    # day_score 최대인 것만 추림, 1e-9 는 bit 연산에서 유래되는 오차를 수용하기 위한 기준으로, 사실상 ds = best_day인 것만 골라내려는 것
-    top = [(w, d, ds) for (w, d, ds) in scored if abs(ds - best_day) <= 1e-9]
-
-    # 주차 겹침 점수가 최대인 것 최종 선택
-    core_set = set(core_week)
-    best, best_score = None, -1e18
-
-    for (w, d, ds) in top:
-        week_overlap = len(set(w) & core_set)
-        score = week_overlap
-        if score > best_score:
-            best_score = score
-            best = (w, d)
-
-    return best
+    scored.sort(reverse=True)  # farthest first
+    k = max(1, int(len(scored) * top_ratio))
+    return [sid for _, sid in scored[:k]]
 
 
 def phase_1(
@@ -160,111 +143,153 @@ def phase_1(
     changed: Dict[int, int],
     C_used: int
 ) -> Tuple[Dict[int, List[int]], Dict[int, int], Dict[int, SchedTuple], Dict[int, int], int]:
+    """
+    Phase1' (core-anchored incremental relocate)
 
-    # artifacts에서 참조 데이터 로드
+    - core stops = pr == best_pr (fixed anchor)
+    - start from current p (usually baseline)
+    - iteratively pick far-from-core stops within a cell and try to relocate them
+      to schedules that reduce "core-proxy cost"
+    - accept only improving proxy moves
+    - respects locks and budget
+
+    Returns clusters/nucleus dummy outputs for compatibility.
+    """
+
     stops: Dict[int, Stop] = artifacts["stops"]
     Ddist: Dict[Tuple[int, int], float] = artifacts["Ddist"]
-    schedrules_map: Dict[Tuple[str, int], List[SchedTuple]] = artifacts["sched_cache"]
+    sched_cache: Dict[Tuple[str, int], List[SchedTuple]] = artifacts["sched_cache"]
     priority_map: Dict[Tuple[str, int], int] = artifacts["priority_map"]
     baseline_sched: Dict[int, SchedTuple] = artifacts["baseline_sched"]
     C_max: int = int(artifacts["C_max"])
 
-    eps: float = 2000.0
-    min_pts: int = 3
-    k_nearest: int = 3
-    alpha: float = 0.2
+    # params
+    max_outer_iters = 300
+    top_ratio = 0.20         # "셀 내에서 core로부터 먼 애" 상위 20%
+    max_cells_per_iter = 20  # 한 바퀴에 최대 몇 cell 볼지 (20이면 전체)
+    max_outliers_per_cell = 25
+    eps_improve = 1e-9
 
-    # priority 그룹 만들기
+    # 0) identify core stops
     priority_groups = build_priority_groups(stops, priority_map)
     if not priority_groups:
-        # priority_map에 매칭되는 stop이 아예 없는 경우 방어
+        # fallback: nothing to do
         clusters = {0: list(stops.keys())}
-        nucleus = {0: choose_nucleus(clusters[0], stops, Ddist)}
+        nucleus = {0: clusters[0][0] if clusters[0] else -1}
         return clusters, nucleus, p, changed, C_used
 
     best_pr = min(priority_groups.keys())
-    core_ids = priority_groups[best_pr]
+    core_ids_all = set(priority_groups[best_pr])
 
-    # 1) core_ids로 DBSCAN
-    clusters, noise = dbscan(core_ids, stops, Ddist, eps=eps, min_pts=min_pts)
+    # 1) build core_by_cell (based on current p; core usually baseline-fixed)
+    #    We'll rebuild periodically because p changes.
+    def rebuild_core_by_cell() -> Dict[Cell, List[int]]:
+        core_by_cell: Dict[Cell, List[int]] = {(l, d): [] for l in WEEKS for d in DAYS_5}
+        for sid in core_ids_all:
+            sched = p[sid]
+            for l in WEEKS:
+                for d in DAYS_5:
+                    if a(sched, l, d) == 1:
+                        core_by_cell[(l, d)].append(sid)
+        return core_by_cell
 
-    # noise core -> singleton cluster 승격
-    next_cid = max(clusters.keys(), default=-1) + 1
-    for stop_id in noise:
-        clusters[next_cid] = [stop_id]
-        next_cid += 1
+    # main loop
+    for _ in range(max_outer_iters):
+        vbc = visited_by_cell(stops, p)
+        core_by_cell = rebuild_core_by_cell()
 
-    # 2) nucleus 계산
-    nucleus: Dict[int, int] = {}
-    for cid, members in clusters.items():
-        nucleus[cid] = choose_nucleus(members, stops, Ddist)
+        # rank cells by "how many non-core are far from core" proxy
+        cell_rank = []
+        for cell, ids in vbc.items():
+            cores = core_by_cell.get(cell, [])
+            if not cores:
+                continue
+            # compute max distance-to-core among non-core in this cell
+            far = 0.0
+            for sid in ids:
+                if sid in core_ids_all:
+                    continue
+                d = min_dist_to_set(sid, cores, stops, Ddist)
+                if d > far:
+                    far = d
+            if far > 0:
+                cell_rank.append((far, cell))
 
-    # 3) 나머지 stop들을 priority 순서대로 편입
-    for pr in sorted(priority_groups.keys()):
-        if pr == best_pr:
-            continue
+        if not cell_rank:
+            break
 
-        for stop_id in priority_groups[pr]:
-            current_stop = stops[stop_id]
-            candidates = schedrules_map.get((current_stop.dowcd, current_stop.frequency), []).copy()
+        cell_rank.sort(reverse=True)
+        cells_to_check = [cell for _, cell in cell_rank[:max_cells_per_iter]]
 
-            base_w, base_d = baseline_sched[stop_id]
-            if current_stop.dowlockcd:
-                candidates = [sched for sched in candidates if sched[1] == base_d]
-            if current_stop.wccd_flag:
-                candidates = [sched for sched in candidates if sched[0] == base_w]
+        improved_any = False
 
-            # 후보 클러스터 (가까운 nucleus 기준)
-            cand_cids = nearest_k_nuclei(stop_id, nucleus, stops, Ddist, k=k_nearest)
-
-            # nucleus가 없거나 후보가 없으면 singleton cluster 생성
-            if not cand_cids:
-                cid = next_cid
-                next_cid += 1
-                clusters[cid] = [stop_id]
-                nucleus[cid] = stop_id
+        for cell in cells_to_check:
+            ids = vbc[cell]
+            cores = core_by_cell.get(cell, [])
+            if not cores:
                 continue
 
-            # (1) 현재 stop이 할당될 수 있는 후보 클러스터별 평가를 1번만 계산해서 저장
-            fit_sched: Dict[int, SchedTuple] = {}    # cid -> (core_week, best_day)
-            need_change: Dict[int, bool] = {}        # cid -> p[stop_id] 변경 필요 여부
-            dist_to: Dict[int, float] = {}           # cid -> dist(stop_id, nucleus[cid])
+            outliers = choose_outliers_in_cell(ids, cores, stops, Ddist, top_ratio=top_ratio)
+            if not outliers:
+                continue
+            outliers = outliers[:max_outliers_per_cell]
 
-            for cid in cand_cids:
-                nuc_id = nucleus[cid]
-                dist_to[cid] = get_dist(stop_id, nuc_id, Ddist, stops)
-                core_week, core_day = p[nuc_id]
+            # among outliers, move "more flexible" first => higher pr value means less constrained
+            outliers.sort(key=lambda sid: priority_map.get((stops[sid].dowcd, stops[sid].frequency), 999), reverse=True)
 
-                best_sched = choose_best_sched(candidates, core_week, core_day, alpha=alpha)
+            for sid in outliers:
+                if sid in core_ids_all:
+                    continue
+
+                stop = stops[sid]
+                old_sched = p[sid]
+
+                candidates = sched_cache.get((stop.dowcd, stop.frequency), []).copy()
+                if old_sched not in candidates:
+                    candidates.append(old_sched)
+
+                candidates = filter_candidates_by_locks(sid, stop, candidates, baseline_sched)
+
+                # must be currently visiting this cell
+                l0, d0 = cell
+                if a(old_sched, l0, d0) != 1:
+                    continue
+
+                old_cost = core_proxy_cost_for_sched(
+                    sid, old_sched, core_by_cell, vbc, stops, Ddist, empty_cell_penalty=1e3
+                )
+
+                best_cost = old_cost
+                best_sched: Optional[SchedTuple] = None
+
+                for new_sched in candidates:
+                    if new_sched == old_sched:
+                        continue
+
+                    # must leave the problematic cell
+                    if a(new_sched, l0, d0) == 1:
+                        continue
+
+                    # budget check (exactly same as try_apply_change would do)
+                    before = changed[sid]
+                    after = 1 if new_sched != baseline_sched[sid] else 0
+                    if (C_used - before + after) > C_max:
+                        continue
+
+                    new_cost = core_proxy_cost_for_sched(
+                        sid, new_sched, core_by_cell, vbc, stops, Ddist, empty_cell_penalty=1e3)
+
+                    if new_cost + eps_improve < best_cost:
+                        best_cost = new_cost
+                        best_sched = new_sched
+
                 if best_sched is None:
                     continue
-                fit_sched[cid] = best_sched
-                need_change[cid] = (p[stop_id] != best_sched)
 
-            usable_cids = [cid for cid in cand_cids if cid in fit_sched]
-            # cid 후보와 유의미하게 겹쳐질 수 있는 schedule이 feasible schedule 중에 없을 때 (현재 코드 구조에서는 거의 발생 x) 그냥 아무거나 반환
-            if not usable_cids:
-                chosen_cid = cand_cids[0]
-                clusters[chosen_cid].append(stop_id)
-                continue
-
-            # (2) 변경 없이 가능하면: 그 중 가장 가까운 클러스터로
-            no_change_cids = [cid for cid in usable_cids if not need_change[cid]]
-            if no_change_cids:
-                chosen_cid = min(no_change_cids, key=lambda cid: dist_to[cid])
-                clusters[chosen_cid].append(stop_id)
-                continue
-
-            # (3) 전부 변경 필요하면: budget 되면 가장 가까운 곳으로 변경 후 편입
-            if C_used + 1 <= C_max:
-                chosen_cid = min(usable_cids, key=lambda cid: dist_to[cid])
-                new_sched = fit_sched[chosen_cid]
-
-                # C_used/C_max 반영해서 상태 dict만 업데이트
                 ok, C_used = try_apply_change(
-                    stop_id=stop_id,
+                    stop_id=sid,
                     stops=stops,
-                    new_sched=new_sched,
+                    new_sched=best_sched,
                     p=p,
                     baseline_sched=baseline_sched,
                     changed=changed,
@@ -272,15 +297,17 @@ def phase_1(
                     C_max=C_max,
                 )
                 if ok:
-                    clusters[chosen_cid].append(stop_id)
-                    continue
+                    improved_any = True
+                    break  # rebuild vbc/core_by_cell and restart scanning
 
-            # budget 불가(or 적용 실패): baseline 유지 + 가장 가까운 곳으로 편입
-            chosen_cid = min(usable_cids, key=lambda cid: dist_to[cid])
-            clusters[chosen_cid].append(stop_id)
+            if improved_any:
+                break
 
-    # Phase 1 끝: nucleus 재계산(한 번만)
-    for cid, members in clusters.items():
-        nucleus[cid] = choose_nucleus(members, stops, Ddist)
+        if not improved_any:
+            break
+
+    # compatibility returns (clusters/nucleus no longer meaningful here)
+    clusters = {0: list(stops.keys())}
+    nucleus = {0: next(iter(core_ids_all)) if core_ids_all else (clusters[0][0] if clusters[0] else -1)}
 
     return clusters, nucleus, p, changed, C_used

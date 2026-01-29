@@ -58,12 +58,6 @@ class Stop:
 
 # 같은 튜플을 하나의 객체로 공유하기 위한 장치 -> 모든 stop마다 week, day pattern을 위한 객체를 만드는 것을 방지하기 위해
 class TuplePools:
-    """
-    Intern immutable tuples to reuse identical objects:
-      - week tuples: (1,), (1,3), (1,2,3,4) ...
-      - day bits: (1,0,1,0,1,0,0) ...
-      - schedules: (week_tuple, day_bits)
-    """
     def __init__(self):
         self._week_pool: Dict[WeekTuple, WeekTuple] = {}
         self._day_pool: Dict[DayBits, DayBits] = {}

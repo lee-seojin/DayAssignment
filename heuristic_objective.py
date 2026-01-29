@@ -141,11 +141,9 @@ def compute_objective(
     w_knn = density_term_w_knn(stops, p, Ddist, neigh)
     obj_knn = w1 * w_knn + w2 * vbal
 
-    print("[Objective scored by heuristic_objective]")
     print(f"[FULL] density      = {w_full:.6f}")
     print(f"[FULL] vol_balance  = {vbal:.6f}")
-    print(f"[FULL] TOTAL        = {obj_full:.6f}")
-
+    print(f"[FULL] TOTAL        = {obj_full:.6f}\n")
     """
     print(f"[kNN ] k={k} (ratio={knn_ratio:.2f})")
     print(f"[kNN ] density      = {w_knn:.6f}")

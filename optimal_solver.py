@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import Dict, Tuple
 
 from dataclasses import dataclass
+from data_type import WeekTuple, DayBits, SchedTuple, ScheduleView, Stop
+from data_type import TuplePools as Pools
 from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M, make_run_prefix
 
 DATA_SET = "1027633" # "1042199"
@@ -26,71 +28,6 @@ DAY_MAP = {
     "THURSDAY": "THU", "FRIDAY": "FRI", "SATURDAY": "SAT", "SUNDAY": "SUN",
     "MON": "MON", "TUE": "TUE", "WED": "WED", "THU": "THU", "FRI": "FRI", "SAT": "SAT", "SUN": "SUN",
 }
-
-# Schedule object of stop
-@dataclass(frozen=True)
-class ScheduleView:
-    week_tuple: Tuple[int, ...]
-    day_bits: Tuple[int, int, int, int, int, int, int]
-
-    def week_key(self) -> Tuple[int, ...]:
-        return self.week_tuple
-
-    def day_key(self) -> Tuple[int, int, int, int, int, int, int]:
-        return self.day_bits
-
-
-@dataclass
-class Stop:
-    custno: int
-    xcoord: float
-    ycoord: float
-    qty: Optional[float]
-    volume: float
-    weight: float
-    sos: Optional[int]
-    dowcd: str
-    dowlockcd: Optional[int]
-    wccd_flag: Optional[int]
-    material_typ: Optional[str]
-    clusterid: Optional[int]
-    frequency: int
-
-    baseline: ScheduleView
-    chosen: Optional[ScheduleView] = None
-    changed: Optional[int] = None
-
-
-# Tuple pools (shared objects)
-WeekTuple = Tuple[int, ...]                         # e.g., (1,), (1,3), (1,2,3,4)
-DayBits = Tuple[int, int, int, int, int, int, int]  # e.g., (1,0,1,0,1,0,0)
-SchedTuple = Tuple[WeekTuple, DayBits]              # schedule = (week_tuple, day_bits)
-
-
-class Pools:
-    """Intern pools immutable tuples -- we reuse identical objects across stops."""
-    def __init__(self):
-        self.week_pool: Dict[WeekTuple, WeekTuple] = {}
-        self.day_pool: Dict[DayBits, DayBits] = {}
-        self.sched_pool: Dict[SchedTuple, SchedTuple] = {}
-
-    def week(self, weeks: Iterable[int]) -> WeekTuple:
-        t = tuple(sorted(tuple(weeks)))
-        if t not in self.week_pool:
-            self.week_pool[t] = t
-        return self.week_pool[t]
-
-    def day(self, bits: DayBits) -> DayBits:
-        if bits not in self.day_pool:
-            self.day_pool[bits] = bits
-        return self.day_pool[bits]
-
-    def schedule(self, week_tuple: WeekTuple, day_bits: DayBits) -> SchedTuple:
-        st = (week_tuple, day_bits)
-        if st not in self.sched_pool:
-            self.sched_pool[st] = st
-        return self.sched_pool[st]
-
 
 # Load params + darules (exactly from your files)
 def load_params(params_path: Path):
@@ -304,7 +241,6 @@ def solve_formulation(
 
     WEEKS_local = list(range(1, timecycle + 1))
     ids = list(stops.keys())
-    neigh = build_k_neighborhood(ids=ids, Ddist=Ddist, stops=stops, k=k_neigh)
 
     max_od_m = max(Ddist.values()) * OD_CM_TO_M if Ddist else 0.0
     lons = [float(stops[i].xcoord) for i in ids]
@@ -321,31 +257,13 @@ def solve_formulation(
         m.setParam(GRB.Param.MIPGap, mip_gap)
 
     # Variables
-    x = {(i, p): m.addVar(vtype=GRB.BINARY, name=f"x_{i}_W{p[0]}_D{p[1]}")
-         for i in ids for p in pi[i]}
-
-    y = {(i, l, d): m.addVar(vtype=GRB.BINARY, name=f"y_{i}_{l}_{d}")
-         for i in ids for l in WEEKS_local for d in DAYS}
-
-    c = {i: m.addVar(vtype=GRB.BINARY, name=f"c_{i}") for i in ids}
-
+    x = {(i, p): m.addVar(vtype=GRB.BINARY, name=f"x_{i}_W{p[0]}_D{p[1]}") for i in ids for p in pi[i]}
+    y = {(i, l, d): m.addVar(vtype=GRB.BINARY, name=f"y_{i}_{l}_{d}") for i in ids for l in WEEKS_local for d in DAYS}
     # z_{i,l,d}: min-nearest distance surrogate
-    z = {(i, l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"z_{i}_{l}_{d}")
-         for i in ids for l in WEEKS_local for d in DAYS}
+    z = {(i, l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"z_{i}_{l}_{d}") for i in ids for l in WEEKS_local for d in DAYS}
 
-    # w_{l,d} = sum_i z_{i,l,d}
-    w = {(l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"w_{l}_{d}")
-         for l in WEEKS_local for d in DAYS}
-
-    # day volume
-    Vday = {(l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vday_{l}_{d}")
-            for l in WEEKS_local for d in DAYS}
-
-    # volume balancing (weekly envelope)
-    Vmax = {l: m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vmax_{l}") for l in WEEKS_local}
-    Vmin = {l: m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vmin_{l}") for l in WEEKS_local}
-
-    # NEW binary v_{i,j,l,d}: j chosen as i's (selected) neighbor on (l,d)
+    neigh = build_k_neighborhood(ids=ids, Ddist=Ddist, stops=stops, k=k_neigh)
+    # binary v_{i,j,l,d}: j chosen as i's (selected) neighbor on (l,d)
     v = {}
     for l in WEEKS_local:
         for d in DAYS:
@@ -353,13 +271,24 @@ def solve_formulation(
                 for j in neigh[i]:
                     v[(i, j, l, d)] = m.addVar(vtype=GRB.BINARY, name=f"v_{i}_{j}_{l}_{d}")
 
+
+    c = {i: m.addVar(vtype=GRB.BINARY, name=f"c_{i}") for i in ids}
+    # w_{l,d} = sum_i z_{i,l,d}
+    w = {(l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"w_{l}_{d}") for l in WEEKS_local for d in DAYS}
+
+    # day volume
+    Vday = {(l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vday_{l}_{d}") for l in WEEKS_local for d in DAYS}
+
+    # volume balancing (weekly envelope)
+    Vmax = {l: m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vmax_{l}") for l in WEEKS_local}
+    Vmin = {l: m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vmin_{l}") for l in WEEKS_local}
+
     m.update()
 
     # Objective
     m.setObjective(
         w1 * gp.quicksum(w[(l, d)] for l in WEEKS_local for d in DAYS)
-        + w2 * gp.quicksum(Vmax[l] - Vmin[l] for l in WEEKS_local),
-        GRB.MINIMIZE
+        + w2 * gp.quicksum(Vmax[l] - Vmin[l] for l in WEEKS_local), GRB.MINIMIZE
     )
 
     # Constraints
