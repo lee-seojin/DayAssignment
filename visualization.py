@@ -269,7 +269,6 @@ def visualize_solver_result(
 
 
 if __name__ == "__main__":
-
     CSV_PATH = "results_heuristic/1042199_20260130_092518_heuristic_resultdetail.csv"
     OUT_DIR = "viz_1042199_heuristic"
 
