@@ -346,11 +346,11 @@ def solve_formulation(
                     dij = get_dist(i, j, Ddist, stops)
 
                     # if v=1 then z >= dij
-                    m.addConstr(z[(i, l, d)] >= dij * v[(i, j, l, d)],
+                    m.addConstr(z[(i, l, d)] >= dij - M * (1 - v[(i, j, l, d)]),
                                 name=f"z_lb_{i}_{j}_{l}_{d}")
 
                     # if v=1 then z <= dij; else relaxed by M
-                    m.addConstr(z[(i, l, d)] <= dij + M * (1 - v[(i, j, l, d)]),
+                    m.addConstr(z[(i, l, d)] <= dij + M * (2 - y[(i, l, d)] - y[(j, l, d)]),
                                 name=f"z_ub_{i}_{j}_{l}_{d}")
 
             # (w) definition

@@ -14,7 +14,7 @@ from data_type import Stop, SchedTuple
 from heuristic_objective import compute_objective
 
 W1, W2 = 1.0, 1.0
-DATA_SET = "1027633" #"1042199"
+DATA_SET = "1027633"
 
 def load_artifacts(pkl_path: Path) -> dict:
     with pkl_path.open("rb") as f:
