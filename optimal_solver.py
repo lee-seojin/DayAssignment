@@ -12,7 +12,7 @@ from typing import Dict, Tuple
 from data_type import WeekTuple, DayBits, SchedTuple, ScheduleView, Stop, DAYS_5, ALL_DAYS_7
 from data_type import TuplePools as Pools
 from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M, make_run_prefix
-from optimal_medoid import find_components, solve_formulation_medoid
+from optimal_medoid import solve_formulation_medoid
 
 DATA_SET = "1027633" # "1042199"
 W1, W2 = 1.0, 1.0

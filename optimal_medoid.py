@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from typing import Dict, List, Tuple, Optional, Iterable
 import gurobipy as gp
 from gurobipy import GRB
-import math
-from typing import Dict, Tuple
 
 from data_type import DAYS_5 as DAYS
-from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M
+from helper_funcs import a, get_dist
 
 def find_components(edges):
     parent = {}
@@ -69,8 +66,23 @@ def solve_formulation_medoid(
     m_medoid = {(j, l, d): m.addVar(vtype=GRB.BINARY)
                 for j in ids for l in WEEKS_local for d in DAYS}
 
-    # edge set (full, 필요하면 k-NN로 줄여도 됨)
-    E = [(i, j) for idx, i in enumerate(ids) for j in ids[idx + 1:]]
+    # edge set
+    K = 20  # 또는 15~30 사이 추천
+    E = set()
+
+    for i in ids:
+        dists = sorted(
+            [(get_dist(i, j, Ddist, stops), j) for j in ids if j != i],
+            key=lambda x: x[0]
+        )[:K]
+
+        for _, j in dists:
+            if i < j:
+                E.add((i, j))
+            else:
+                E.add((j, i))
+
+    E = list(E)
 
     e = {(i, j, l, d): m.addVar(vtype=GRB.BINARY)
          for (i, j) in E for l in WEEKS_local for d in DAYS}
