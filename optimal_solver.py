@@ -7,27 +7,16 @@ import pandas as pd
 import gurobipy as gp
 from gurobipy import GRB
 import math
-import csv
-from datetime import datetime
 from typing import Dict, Tuple
 
-from dataclasses import dataclass
-from data_type import WeekTuple, DayBits, SchedTuple, ScheduleView, Stop
+from data_type import WeekTuple, DayBits, SchedTuple, ScheduleView, Stop, DAYS_5, ALL_DAYS_7
 from data_type import TuplePools as Pools
 from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M, make_run_prefix
+from optimal_medoid import find_components, solve_formulation_medoid
 
 DATA_SET = "1027633" # "1042199"
 W1, W2 = 1.0, 1.0
-RUN_TIME = 600
-
-# Constants (days)
-DAYS = ["MON", "TUE", "WED", "THU", "FRI"]
-ALL_DAYS_7 = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]  # a_(p,l,d) 인덱싱용
-DAY_MAP = {
-    "MONDAY": "MON", "TUESDAY": "TUE", "WEDNESDAY": "WED",
-    "THURSDAY": "THU", "FRIDAY": "FRI", "SATURDAY": "SAT", "SUNDAY": "SUN",
-    "MON": "MON", "TUE": "TUE", "WED": "WED", "THU": "THU", "FRI": "FRI", "SAT": "SAT", "SUN": "SUN",
-}
+RUN_TIME = 60*20
 
 # Load params + darules (exactly from your files)
 def load_params(params_path: Path):
@@ -89,7 +78,7 @@ def week_options_from_dowcd(dowcd: str, pools: Pools) -> List[WeekTuple]:
 
 # Build Stop objects + feasible schedules (tuple-pool shared)
 def daybits_from_bef_row(r: pd.Series, pools: Pools) -> DayBits:
-    bits5 = [int(r[f"BEF_{d}"]) for d in DAYS]   # MON..FRI
+    bits5 = [int(r[f"BEF_{d}"]) for d in DAYS_5]   # MON..FRI
     bits7: DayBits = tuple(bits5 + [0, 0])       # SAT,SUN = 0
     return pools.day(bits7)
 
@@ -258,15 +247,15 @@ def solve_formulation(
 
     # Variables
     x = {(i, p): m.addVar(vtype=GRB.BINARY, name=f"x_{i}_W{p[0]}_D{p[1]}") for i in ids for p in pi[i]}
-    y = {(i, l, d): m.addVar(vtype=GRB.BINARY, name=f"y_{i}_{l}_{d}") for i in ids for l in WEEKS_local for d in DAYS}
+    y = {(i, l, d): m.addVar(vtype=GRB.BINARY, name=f"y_{i}_{l}_{d}") for i in ids for l in WEEKS_local for d in DAYS_5}
     # z_{i,l,d}: min-nearest distance surrogate
-    z = {(i, l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"z_{i}_{l}_{d}") for i in ids for l in WEEKS_local for d in DAYS}
+    z = {(i, l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"z_{i}_{l}_{d}") for i in ids for l in WEEKS_local for d in DAYS_5}
 
     neigh = build_k_neighborhood(ids=ids, Ddist=Ddist, stops=stops, k=k_neigh)
     # binary v_{i,j,l,d}: j chosen as i's (selected) neighbor on (l,d)
     v = {}
     for l in WEEKS_local:
-        for d in DAYS:
+        for d in DAYS_5:
             for i in ids:
                 for j in neigh[i]:
                     v[(i, j, l, d)] = m.addVar(vtype=GRB.BINARY, name=f"v_{i}_{j}_{l}_{d}")
@@ -274,10 +263,10 @@ def solve_formulation(
 
     c = {i: m.addVar(vtype=GRB.BINARY, name=f"c_{i}") for i in ids}
     # w_{l,d} = sum_i z_{i,l,d}
-    w = {(l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"w_{l}_{d}") for l in WEEKS_local for d in DAYS}
+    w = {(l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"w_{l}_{d}") for l in WEEKS_local for d in DAYS_5}
 
     # day volume
-    Vday = {(l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vday_{l}_{d}") for l in WEEKS_local for d in DAYS}
+    Vday = {(l, d): m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vday_{l}_{d}") for l in WEEKS_local for d in DAYS_5}
 
     # volume balancing (weekly envelope)
     Vmax = {l: m.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"Vmax_{l}") for l in WEEKS_local}
@@ -287,7 +276,7 @@ def solve_formulation(
 
     # Objective
     m.setObjective(
-        w1 * gp.quicksum(w[(l, d)] for l in WEEKS_local for d in DAYS)
+        w1 * gp.quicksum(w[(l, d)] for l in WEEKS_local for d in DAYS_5)
         + w2 * gp.quicksum(Vmax[l] - Vmin[l] for l in WEEKS_local), GRB.MINIMIZE
     )
 
@@ -299,7 +288,7 @@ def solve_formulation(
     # (2) y definition using helper_funcs.a()
     for i in ids:
         for l in WEEKS_local:
-            for d in DAYS:
+            for d in DAYS_5:
                 m.addConstr(
                     y[(i, l, d)] == gp.quicksum(a(p, l, d) * x[(i, p)] for p in pi[i]),
                     name=f"ydef_{i}_{l}_{d}"
@@ -307,7 +296,7 @@ def solve_formulation(
 
     # (3) volume cap + Vday definition & (4) weight cap
     for l in WEEKS_local:
-        for d in DAYS:
+        for d in DAYS_5:
             vol_sum = gp.quicksum(stops[i].volume * y[(i, l, d)] for i in ids)
             m.addConstr(Vday[(l, d)] == vol_sum, name=f"Vday_def_{l}_{d}")
             m.addConstr(vol_sum <= v_max, name=f"capV_{l}_{d}")
@@ -327,7 +316,7 @@ def solve_formulation(
 
     # (7') min-nearest surrogate with selection binary v (all pairs)
     for l in WEEKS_local:
-        for d in DAYS:
+        for d in DAYS_5:
             for i in ids:
                 # z is active only if i visited
                 m.addConstr(z[(i, l, d)] <= M * y[(i, l, d)], name=f"z_act_{i}_{l}_{d}")
@@ -361,7 +350,7 @@ def solve_formulation(
 
     # Volume balancing envelope
     for l in WEEKS_local:
-        for d in DAYS:
+        for d in DAYS_5:
             m.addConstr(Vmax[l] >= Vday[(l, d)], name=f"Vmax_ge_{l}_{d}")
             m.addConstr(Vmin[l] <= Vday[(l, d)], name=f"Vmin_le_{l}_{d}")
 
@@ -413,9 +402,9 @@ def main():
     Ddist = load_od_matrix(Path(f"{DATA_SET}/od.txt"))
 
     # 5) solve (new objective formulation)
-    model, chosen_tuple, changed = solve_formulation(stops=stops, pi=Pi, baseline_sched=baseline_sched,
+    model, chosen_tuple, changed = solve_formulation_medoid(stops=stops, pi=Pi, baseline_sched=baseline_sched,
                                                      timecycle=timecycle, v_max=V_MAX, g_max=G_MAX, c_max=C_MAX,
-                                                     Ddist=Ddist, w1=W1, w2=W2, time_limit=RUN_TIME, mip_gap=0.0, k_neigh= K_NEIGH)
+                                                     Ddist=Ddist, w1=W1, w2=W2, time_limit=RUN_TIME, mip_gap=0.0)
 
     # 6) write chosen schedules back to Stop class (final layer = class)
     for s in stops.values():
@@ -425,93 +414,56 @@ def main():
 
     # 7) export in the same column structures with heuristic
     rows = []
+
     for s in stops.values():
-        assert s.chosen is not None
 
-        base_w = s.baseline.week_tuple
-        base_d = s.baseline.day_bits
-        ch_w = s.chosen.week_tuple
-        ch_d = s.chosen.day_bits
+        base_week = s.baseline.week_tuple
+        base_day = s.baseline.day_bits
+        ch_week = s.chosen.week_tuple
+        ch_day = s.chosen.day_bits
 
-        rows.append({
-            "stop_id": s.custno,
-            "xcoord": float(s.xcoord),
-            "ycoord": float(s.ycoord),
-            "volume": float(s.volume),
-            "frequency": int(s.frequency),
-            "baseline_dowcd": str(s.dowcd),
-            "baseline_week": _weektuple_to_str(base_w),
-            "wccd_flag": int(s.wccd_flag) if s.wccd_flag is not None else 0,
-            "baseline_daybits": tuple(int(x) for x in base_d),
-            "dowlockcd": int(s.dowlockcd) if s.dowlockcd is not None else 0,
-            "chosen_week": _weektuple_to_str(ch_w),
-            "chosen_daybits": tuple(int(x) for x in ch_d),
-            "changed": int(s.changed),
-        })
+        for l in range(1, timecycle + 1):
 
-    run_prefix = make_run_prefix(DATA_SET)
+            # 이 week에 방문하는지
+            active = (l in ch_week)
+
+            if not active:
+                continue
+
+            row = {
+                "WEEK#": l,
+                "STOP ID": s.custno,
+                "PIECES": float(s.qty),
+                "VOLUME": float(s.volume),
+            }
+
+            # BEFORE (baseline)
+            for idx, d in enumerate(ALL_DAYS_7):
+                col = f"BEF_{d}"
+                row[col] = int(base_day[idx]) if l in base_week else 0
+
+            # AFTER (chosen)
+            for idx, d in enumerate(ALL_DAYS_7):
+                col = f"AFT_{d}"
+                row[col] = int(ch_day[idx]) if l in ch_week else 0
+
+            row["CHANGED"] = int(s.changed)
+
+            rows.append(row)
 
     out_dir = Path("results_optimal")
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{run_prefix}_optimal_resultdetail.csv"
+    out_path = out_dir / f"{make_run_prefix(DATA_SET)}_resultdetail.csv"
+    df = pd.DataFrame(rows)
 
-    opt_status = model.Status
-    is_opt = (opt_status == GRB.OPTIMAL)
+    # 컬럼 순서 맞추기
+    cols = ["WEEK#", "STOP ID", "PIECES", "VOLUME"] + \
+           [f"BEF_{d}" for d in ALL_DAYS_7] + \
+           [f"AFT_{d}" for d in ALL_DAYS_7] + \
+           ["CHANGED"]
 
-    # incumbent objective는 TIME_LIMIT인데 feasible 해가 없으면 접근 에러날 수 있어서 안전 처리
-    opt_obj = None
-    opt_bound = None
-    opt_gap = None
-    try:
-        opt_obj = float(model.ObjVal)
-        opt_bound = float(model.ObjBound)
-        opt_gap = float(model.MIPGap) * 100.0
-    except:
-        opt_obj, opt_bound, opt_gap = None, None, None
-
-    meta_header = [
-        "Date",
-        "Data set",
-        "Optimal Solver",
-        "Objective (Best incumbent)",
-        "Best Bound",
-        "Gap(%)",
-        "Optimal 여부",
-        "TimeLimit(s)",
-        "k",
-        "w1",
-        "w2",
-    ]
-
-    meta_values = [
-        datetime.now().strftime("%y/%m/%d"),
-        DATA_SET,
-        "Gurobi",
-        opt_obj,
-        opt_bound,
-        opt_gap,
-        ("O" if is_opt else "X"),
-        RUN_TIME,
-        K_NEIGH,
-        W1,
-        W2,
-    ]
-
-    # write: 2 meta rows + blank row + stop table
-    with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(meta_header)
-        w.writerow(meta_values)
-        w.writerow([])
-
-    # write: sort columns manually
-    out = pd.DataFrame(rows, columns=[
-        "stop_id", "xcoord", "ycoord", "volume", "frequency",
-        "baseline_dowcd", "baseline_week", "wccd_flag",
-        "baseline_daybits", "dowlockcd",
-        "chosen_week", "chosen_daybits", "changed",
-    ])
-    out.to_csv(out_path, mode="a", index=False, encoding="utf-8-sig")
+    df = df[cols]
+    df.to_csv(out_path, index=False, encoding="utf-8-sig")
 
     print(f"Saved: {out_path}")
 

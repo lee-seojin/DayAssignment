@@ -226,12 +226,8 @@ def phase_1(
         for cell in cells_to_check:
             ids = vbc[cell]
             cores = core_by_cell.get(cell, [])
-            if not cores:
-                continue
 
             outliers = choose_outliers_in_cell(ids, cores, stops, Ddist, top_ratio=top_ratio)
-            if not outliers:
-                continue
             outliers = outliers[:max_outliers_per_cell]
 
             # among outliers, move "more flexible" first => higher pr value means less constrained
