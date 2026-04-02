@@ -1,290 +1,204 @@
 from __future__ import annotations
 
+import math
+from typing import Dict, List, Tuple, Optional
+
 import gurobipy as gp
 from gurobipy import GRB
 
-from data_type import DAYS_5 as DAYS
-from helper_funcs import a, get_dist
+from data_type import SchedTuple, Stop, DAYS_5
+from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M
 
-def find_components(edges):
-    parent = {}
-    def find(x):
-        if parent[x] != x:
-            parent[x] = find(parent[x])
-        return parent[x]
-
-    def union(a, b):
-        parent[find(a)] = find(b)
-
-    nodes = set()
-    for i, j in edges:
-        nodes.add(i)
-        nodes.add(j)
-
-    for n in nodes:
-        parent[n] = n
-
-    for i, j in edges:
-        union(i, j)
-
-    comp = {}
-    for n in nodes:
-        root = find(n)
-        comp.setdefault(root, []).append(n)
-
-    return list(comp.values())
 
 def solve_formulation_medoid(
-    stops,
-    pi,
-    baseline_sched,
-    timecycle,
-    v_max,
-    g_max,
-    c_max,
-    Ddist,
-    w1=1.0,
-    w2=1.0,
-    time_limit=600,
-    mip_gap=0.0,
-):
+    stops: Dict[int, Stop],
+    pi: Dict[int, List[SchedTuple]],
+    baseline_sched: Dict[int, SchedTuple],
+    timecycle: int,
+    v_max: float,
+    g_max: float,
+    c_max: int,
+    Ddist: Dict[Tuple[int, int], float],
+    w1: float = 1.0,
+    w2: float = 1.0,
+    time_limit: Optional[int] = 600,
+    mip_gap: Optional[float] = 0.0,
+    vol_tolerance: float = 0.2,
+) -> Tuple[gp.Model, Dict[int, SchedTuple], Dict[int, int]]:
 
     WEEKS_local = list(range(1, timecycle + 1))
     ids = list(stops.keys())
 
-    m = gp.Model("Medoid_MST")
+    # Big-M: identical pattern to solve_formulation() in optimal_solver.py
+    max_od_m = max(Ddist.values()) * OD_CM_TO_M if Ddist else 0.0
+    lons = [float(stops[i].xcoord) for i in ids]
+    lats = [float(stops[i].ycoord) for i in ids]
+    max_manh_m = (abs(max(lats) - min(lats)) + abs(max(lons) - min(lons))) * (math.pi / 180.0) * EARTH_R_M
+    M = max(max_od_m, max_manh_m, 1.0)
 
-    m.setParam(GRB.Param.TimeLimit, time_limit)
-    m.setParam(GRB.Param.MIPGap, mip_gap)
+    # Model
+    model = gp.Model("DayAssign_MSSC_Medoid")
+    if time_limit is not None:
+        model.setParam(GRB.Param.TimeLimit, time_limit)
+    if mip_gap is not None:
+        model.setParam(GRB.Param.MIPGap, mip_gap)
 
-    # 변수
-    x = {(i, p): m.addVar(vtype=GRB.BINARY) for i in ids for p in pi[i]}
-    y = {(i, l, d): m.addVar(vtype=GRB.BINARY) for i in ids for l in WEEKS_local for d in DAYS}
-    c = {i: m.addVar(vtype=GRB.BINARY) for i in ids}
+    # Decision variables
+    # x_{ip} ∈ {0,1}: stop i selects schedule p
+    x = {(i, p): model.addVar(vtype=GRB.BINARY, name=f"x_{i}_W{p[0]}_D{p[1]}")
+         for i in ids for p in pi[i]}
 
-    # medoid
-    m_medoid = {(j, l, d): m.addVar(vtype=GRB.BINARY)
-                for j in ids for l in WEEKS_local for d in DAYS}
+    # y_{ild} ∈ {0,1}: stop i is visited on (l, d)
+    y = {(i, l, d): model.addVar(vtype=GRB.BINARY, name=f"y_{i}_{l}_{d}")
+         for i in ids for l in WEEKS_local for d in DAYS_5}
 
-    # edge set
-    K = 20  # 또는 15~30 사이 추천
-    E = set()
+    # c_i ∈ {0,1}: 1 if stop i changes its schedule
+    c = {i: model.addVar(vtype=GRB.BINARY, name=f"c_{i}") for i in ids}
 
-    for i in ids:
-        dists = sorted(
-            [(get_dist(i, j, Ddist, stops), j) for j in ids if j != i],
-            key=lambda x: x[0]
-        )[:K]
+    # m_{jld} ∈ {0,1}: 1 if node j is medoid of (l, d)
+    m_med = {(j, l, d): model.addVar(vtype=GRB.BINARY, name=f"m_{j}_{l}_{d}")
+             for j in ids for l in WEEKS_local for d in DAYS_5}
 
-        for _, j in dists:
-            if i < j:
-                E.add((i, j))
-            else:
-                E.add((j, i))
+    # w_{ld}: workload (= total volume) on day (l, d)
+    w = {(l, d): model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"w_{l}_{d}")
+         for l in WEEKS_local for d in DAYS_5}
 
-    E = list(E)
+    # z_{ld} ∈ {0,1}: 1 if at least one stop is assigned to (l, d)
+    z = {(l, d): model.addVar(vtype=GRB.BINARY, name=f"z_{l}_{d}")
+         for l in WEEKS_local for d in DAYS_5}
 
-    e = {(i, j, l, d): m.addVar(vtype=GRB.BINARY)
-         for (i, j) in E for l in WEEKS_local for d in DAYS}
+    # w_bar: average workload scalar
+    w_bar = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name="w_bar")
 
-    # MST length
-    w = {(l, d): m.addVar(lb=0.0) for l in WEEKS_local for d in DAYS}
+    # wb_z_{ld}: linearisation of w_bar * z_{ld}  (continuous × binary)
+    wb_z = {(l, d): model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"wb_z_{l}_{d}")
+            for l in WEEKS_local for d in DAYS_5}
 
-    # volume
-    Vday = {(l, d): m.addVar(lb=0.0) for l in WEEKS_local for d in DAYS}
-    Vmax = {l: m.addVar(lb=0.0) for l in WEEKS_local}
-    Vmin = {l: m.addVar(lb=0.0) for l in WEEKS_local}
+    # f_{ijld} = m_{jld} * y_{ild}: linearisation of bilinear objective term
+    f = {(i, j, l, d): model.addVar(vtype=GRB.BINARY, name=f"f_{i}_{j}_{l}_{d}")
+         for i in ids for j in ids if i != j
+         for l in WEEKS_local for d in DAYS_5}
 
-    m.update()
+    model.update()
 
-    # Objective
-    term1 = gp.quicksum(
-        get_dist(i, j, Ddist, stops) * y[(i, l, d)] * m_medoid[(j, l, d)]
-        for i in ids for j in ids
-        for l in WEEKS_local for d in DAYS
-    )
-
-    m.setObjective(
-        w1 * term1 +
-        w2 * gp.quicksum(Vmax[l] - Vmin[l] for l in WEEKS_local),
+    # Objective: min Σ_{i≠j,l,d} D_{ij} * f_{ijld}
+    model.setObjective(
+        gp.quicksum(
+            get_dist(i, j, Ddist, stops) * f[(i, j, l, d)]
+            for i in ids for j in ids if i != j
+            for l in WEEKS_local for d in DAYS_5
+        ),
         GRB.MINIMIZE
     )
 
     # Constraints
-    # (1)
+    # (1) Each stop selects exactly one feasible schedule
     for i in ids:
-        m.addConstr(gp.quicksum(x[(i, p)] for p in pi[i]) == 1)
+        model.addConstr(gp.quicksum(x[(i, p)] for p in pi[i]) == 1,
+                        name = f"choose1_{i}")
 
-    # (2)
+    # (2) y definition via helper a(p, l, d)
     for i in ids:
         for l in WEEKS_local:
-            for d in DAYS:
-                m.addConstr(
-                    y[(i, l, d)] == gp.quicksum(a(p, l, d) * x[(i, p)] for p in pi[i])
-                )
+            for d in DAYS_5:
+                model.addConstr(
+                    y[(i, l, d)] == gp.quicksum(a(p, l, d) * x[(i, p)] for p in pi[i]),
+                    name=f"ydef_{i}_{l}_{d}")
 
-    # (3)(4)
+    # (3) Daily volume capacity
     for l in WEEKS_local:
-        for d in DAYS:
-            vol = gp.quicksum(stops[i].volume * y[(i, l, d)] for i in ids)
-            m.addConstr(Vday[(l, d)] == vol)
-            m.addConstr(vol <= v_max)
+        for d in DAYS_5:
+            model.addConstr(
+                gp.quicksum(stops[i].volume * y[(i, l, d)] for i in ids) <= v_max,
+                name=f"capV_{l}_{d}")
 
-            m.addConstr(
-                gp.quicksum(stops[i].weight * y[(i, l, d)] for i in ids) <= g_max
-            )
+    # (4) Daily weight capacity
+    for l in WEEKS_local:
+        for d in DAYS_5:
+            model.addConstr(
+                gp.quicksum(stops[i].weight * y[(i, l, d)] for i in ids) <= g_max,
+                name=f"capG_{l}_{d}")
 
-    # (5)(6)
+    # (5) Change indicator: c_i = 1 - x_{i,p0}
     for i in ids:
-        p0 = baseline_sched[i]
-        m.addConstr(c[i] + x[(i, p0)] == 1)
+        model.addConstr(c[i] == 1 - x[(i, baseline_sched[i])], name=f"change_{i}")
 
-    m.addConstr(gp.quicksum(c[i] for i in ids) <= c_max)
+    # (6) Change budget
+    model.addConstr(gp.quicksum(c[i] for i in ids) <= c_max, name="change_budget")
 
-    # medoid
+    # (7) Exactly one medoid if stops present, zero if not: Σ_j m_{jld} = z_{ld}
     for l in WEEKS_local:
-        for d in DAYS:
-            m.addConstr(gp.quicksum(m_medoid[(j, l, d)] for j in ids) == 1)
+        for d in DAYS_5:
+            model.addConstr(
+                gp.quicksum(m_med[(j, l, d)] for j in ids) == z[(l, d)],
+                name=f"medoid_eq_z_{l}_{d}")
 
+    # (8) Medoid only if stop is assigned to (l, d)
     for j in ids:
         for l in WEEKS_local:
-            for d in DAYS:
-                m.addConstr(m_medoid[(j, l, d)] <= y[(j, l, d)])
+            for d in DAYS_5:
+                model.addConstr(m_med[(j, l, d)] <= y[(j, l, d)],
+                                name=f"medoid_assigned_{j}_{l}_{d}")
 
-    # edge
-    for (i, j) in E:
-        for l in WEEKS_local:
-            for d in DAYS:
-                m.addConstr(e[(i, j, l, d)] <= y[(i, l, d)])
-                m.addConstr(e[(i, j, l, d)] <= y[(j, l, d)])
-
-    # 🔥 edge count (수정 완료 버전)
+    # (9) w_{ld} = 0 when no stops assigned
     for l in WEEKS_local:
-        for d in DAYS:
-            m.addConstr(
-                gp.quicksum(e[(i, j, l, d)] for (i, j) in E)
-                <= gp.quicksum(y[(i, l, d)] for i in ids) - 1
-            )
+        for d in DAYS_5:
+            model.addConstr(w[(l, d)] <= M * z[(l, d)],
+                            name=f"w_zero_if_empty_{l}_{d}")
 
-    # MST length
+    # (10) Workload definition
     for l in WEEKS_local:
-        for d in DAYS:
-            m.addConstr(
-                w[(l, d)] ==
-                gp.quicksum(get_dist(i, j, Ddist, stops) * e[(i, j, l, d)]
-                            for (i, j) in E)
-            )
+        for d in DAYS_5:
+            model.addConstr(
+                w[(l, d)] == gp.quicksum(stops[i].volume * y[(i, l, d)] for i in ids),
+                name=f"wdef_{l}_{d}")
 
-    # balancing
+    # (11) w_bar definition: w_bar * L * |D| = Σ_{l,d} w_{ld}
+    L_count = len(WEEKS_local)
+    D_count = len(DAYS_5)
+    model.addConstr(
+        w_bar * (L_count * D_count) == gp.quicksum(w[(l, d)] for l in WEEKS_local for d in DAYS_5),
+        name="wbar_def")
+
+    # (12) Workload tolerance: (1-tol)*wb_z ≤ w_{ld} ≤ (1+tol)*wb_z
+    # wb_z_{ld} = w_bar * z_{ld}  (continuous × binary, McCormick linearisation)
+    lo = 1.0 - vol_tolerance   # default 0.8
+    hi = 1.0 + vol_tolerance   # default 1.2
     for l in WEEKS_local:
-        for d in DAYS:
-            m.addConstr(Vmax[l] >= w[(l, d)])
-            m.addConstr(Vmin[l] <= w[(l, d)])
+        for d in DAYS_5:
+            wbz = wb_z[(l, d)]
+            model.addConstr(wbz <= M * z[(l, d)],               name=f"wbz_ub1_{l}_{d}")
+            model.addConstr(wbz <= w_bar,                        name=f"wbz_ub2_{l}_{d}")
+            model.addConstr(wbz >= w_bar - M * (1 - z[(l, d)]), name=f"wbz_lb_{l}_{d}")
+            model.addConstr(w[(l, d)] >= lo * wbz,              name=f"wtol_lo_{l}_{d}")
+            model.addConstr(w[(l, d)] <= hi * wbz,              name=f"wtol_hi_{l}_{d}")
 
-    for l in WEEKS_local:
-        for d in DAYS:
-            m.addConstr(Vmax[l] >= Vday[(l, d)])
-            m.addConstr(Vmin[l] <= Vday[(l, d)])
+    # Linearisation of f_{ijld} = m_{jld} * y_{ild}  (both binary → standard McCormick)
+    for i in ids:
+        for j in ids:
+            if i == j:
+                continue
+            for l in WEEKS_local:
+                for d in DAYS_5:
+                    fv = f[(i, j, l, d)]
+                    model.addConstr(fv <= m_med[(j, l, d)],                     name=f"fle_m_{i}_{j}_{l}_{d}")
+                    model.addConstr(fv <= y[(i, l, d)],                         name=f"fle_y_{i}_{j}_{l}_{d}")
+                    model.addConstr(fv >= m_med[(j, l, d)] + y[(i, l, d)] - 1, name=f"fge_{i}_{j}_{l}_{d}")
 
-    # Lazy constraint
-    def find_components(edges):
-        parent = {}
+    # Solve
+    model.optimize()
 
-        def find(x):
-            if parent[x] != x:
-                parent[x] = find(parent[x])
-            return parent[x]
+    if model.Status not in [GRB.OPTIMAL, GRB.TIME_LIMIT]:
+        raise RuntimeError(f"Optimization ended with status {model.Status}")
 
-        def union(a, b):
-            parent[find(a)] = find(b)
-
-        nodes = set()
-        for i, j in edges:
-            nodes.add(i)
-            nodes.add(j)
-
-        for n in nodes:
-            parent[n] = n
-
-        for i, j in edges:
-            union(i, j)
-
-        comp = {}
-        for n in nodes:
-            root = find(n)
-            comp.setdefault(root, []).append(n)
-
-        return list(comp.values())
-
-    def mst_callback(model, where):
-        if where == GRB.Callback.MIPSOL:
-
-            vals = model.cbGetSolution(model._e)
-            yvals = model.cbGetSolution(model._y)
-
-            for l in model._L:
-                for d in model._D:
-
-                    active_nodes = [i for i in model._ids if yvals[(i, l, d)] > 0.5]
-
-                    edges = [(i, j) for (i, j) in model._E
-                             if vals[(i, j, l, d)] > 0.5]
-
-                    if len(active_nodes) <= 1:
-                        continue
-
-                    # ❗ connectivity 체크
-                    if len(edges) < len(active_nodes) - 1:
-                        model.cbLazy(
-                            gp.quicksum(
-                                model._e[(i, j, l, d)] for (i, j) in model._E
-                            )
-                            >= len(active_nodes) - 1
-                        )
-
-                    comps = find_components(edges)
-
-                    for comp in comps:
-                        if len(comp) <= 1:
-                            continue
-
-                        edge_count = sum(
-                            vals[(i, j, l, d)]
-                            for (i, j) in model._E
-                            if i in comp and j in comp
-                        )
-
-                        if edge_count >= len(comp):
-                            model.cbLazy(
-                                gp.quicksum(
-                                    model._e[(i, j, l, d)]
-                                    for (i, j) in model._E
-                                    if i in comp and j in comp
-                                )
-                                <= len(comp) - 1
-                            )
-
-    # attach
-    m._e = e
-    m._y = y
-    m._E = E
-    m._ids = ids
-    m._L = WEEKS_local
-    m._D = DAYS
-
-    m.Params.LazyConstraints = 1
-
-    # solve
-    m.optimize(mst_callback)
-
-    if m.Status not in [GRB.OPTIMAL, GRB.TIME_LIMIT]:
-        raise RuntimeError(f"Optimization ended with status {m.Status}")
-
-    chosen_tuple = {}
+    # Extract results
+    chosen_tuple: Dict[int, SchedTuple] = {}
     for i in ids:
         for p in pi[i]:
             if x[(i, p)].X > 0.5:
                 chosen_tuple[i] = p
                 break
 
-    return m, chosen_tuple, {i: int(round(c[i].X)) for i in ids}
+    changed_map: Dict[int, int] = {i: int(round(c[i].X)) for i in ids}
+
+    return model, chosen_tuple, changed_map

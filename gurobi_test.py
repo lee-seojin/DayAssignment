@@ -2,7 +2,6 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 from heuristic_solver import load_artifacts
-from heuristic_objective import compute_objective
 
 import ast
 import pandas as pd
@@ -57,6 +56,152 @@ def build_p_from_result_csv(csv_path: Path) -> Dict[int, SchedTuple]:
 
     return p
 
+from typing import Dict, Tuple, List
+from data_type import Stop, SchedTuple
+from helper_funcs import a, get_dist, WEEKS, DAYS_5
+
+Cell = Tuple[int, str]
+
+
+def build_knn_graph(ids, stops, Ddist, K=20):
+    neigh = {}
+    for i in ids:
+        dists = sorted(
+            [(get_dist(i, j, Ddist, stops), j) for j in ids if j != i],
+            key=lambda x: x[0]
+        )[:K]
+        neigh[i] = [j for _, j in dists]
+    return neigh
+
+
+def compute_function(
+    artifacts: dict,
+    p: Dict[int, SchedTuple],
+    w_mst: float = 1.0,
+    w_mssc: float = 1.0,
+    w_vbal: float = 0.0,
+):
+    stops: Dict[int, Stop] = artifacts["stops"]
+    Ddist = artifacts["Ddist"]
+    ids = list(stops.keys())
+
+    # ---------------------------
+    # 1. cell grouping
+    # ---------------------------
+    visited = {(l, d): [] for l in WEEKS for d in DAYS_5}
+
+    for i in ids:
+        sched = p[i]
+        for l in WEEKS:
+            for d in DAYS_5:
+                if a(sched, l, d) == 1:
+                    visited[(l, d)].append(i)
+
+    # ---------------------------
+    # 2. KNN graph (K=20 동일하게)
+    # ---------------------------
+    K = 20
+    neigh = build_knn_graph(ids, stops, Ddist, K=K)
+
+    # ---------------------------
+    # 3. MST on KNN graph (Prim restricted)
+    # ---------------------------
+    def compute_mst_knn(ids_cell: List[int]) -> float:
+        if len(ids_cell) <= 1:
+            return 0.0
+
+        ids_set = set(ids_cell)
+        used = set([ids_cell[0]])
+        total = 0.0
+
+        while len(used) < len(ids_cell):
+            best = float("inf")
+            best_j = None
+
+            for i in used:
+                for j in neigh[i]:
+                    if j not in ids_set or j in used:
+                        continue
+                    d = get_dist(i, j, Ddist, stops)
+                    if d < best:
+                        best = d
+                        best_j = j
+
+            # fallback (연결 안될 때)
+            if best_j is None:
+                for i in used:
+                    for j in ids_cell:
+                        if j in used:
+                            continue
+                        d = get_dist(i, j, Ddist, stops)
+                        if d < best:
+                            best = d
+                            best_j = j
+
+            total += best
+            used.add(best_j)
+
+        return total
+
+    mst_total = 0.0
+    for ids_cell in visited.values():
+        mst_total += compute_mst_knn(ids_cell)
+
+    # ---------------------------
+    # 4. MSSC (medoid 기반)
+    # ---------------------------
+    def compute_mssc_medoid(ids_cell: List[int]) -> float:
+        if len(ids_cell) <= 1:
+            return 0.0
+
+        best_total = float("inf")
+
+        for j in ids_cell:  # j = medoid 후보
+            total = 0.0
+            for i in ids_cell:
+                d = get_dist(i, j, Ddist, stops)
+                total += d
+            if total < best_total:
+                best_total = total
+
+        return best_total
+
+    mssc_total = 0.0
+    for ids_cell in visited.values():
+        mssc_total += compute_mssc_medoid(ids_cell)
+
+    # ---------------------------
+    # 5. Volume balance
+    # ---------------------------
+    V = {(l, d): 0.0 for l in WEEKS for d in DAYS_5}
+
+    for i, s in stops.items():
+        sched = p[i]
+        for l in WEEKS:
+            for d in DAYS_5:
+                if a(sched, l, d) == 1:
+                    V[(l, d)] += float(s.volume)
+
+    vbal = 0.0
+    for l in WEEKS:
+        vals = [V[(l, d)] for d in DAYS_5]
+        vbal += (max(vals) - min(vals))
+
+    # ---------------------------
+    # 6. Final objective
+    # ---------------------------
+    obj = (
+        w_mst * mst_total +
+        w_mssc * mssc_total +
+        w_vbal * vbal
+    )
+
+    return {
+        "obj": obj,
+        "mst_knn": mst_total,
+        "mssc_medoid": mssc_total,
+        "vol_balance": vbal,
+    }
 
 def main():
     # 너 프로젝트에서 artifacts.pkl 저장된 위치로만 맞춰주면 됨
@@ -70,6 +215,7 @@ def main():
     p = build_p_from_result_csv(GUROBI_CSV)
 
     obj = compute_objective(artifacts, p, w1=1.0, w2=1.0)
+
 
 if __name__ == "__main__":
     main()
