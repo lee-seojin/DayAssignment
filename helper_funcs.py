@@ -2,6 +2,7 @@ from data_type import SchedTuple, DAYS_5, ALL_DAYS_7, WEEKS, Stop
 from typing import Dict, Tuple
 import math
 from datetime import datetime
+from typing import List
 
 def a(schedule: SchedTuple, l: int, d: str) -> int:
     """schedule이 (week=l, day=d)에 방문하면 1 else 0"""
@@ -107,3 +108,24 @@ def make_run_prefix(dataset: str) -> str:
     date_str = now.strftime("%Y%m%d")   # 20260127
     time_str = now.strftime("%H%M%S")   # 153012
     return f"{dataset}_{date_str}_{time_str}"
+
+
+def build_k_neighborhood(
+    ids: List[int],
+    Ddist: Dict[Tuple[int, int], float],
+    stops: Dict[int, Stop],
+    k: int = 10,
+) -> Dict[int, List[int]]:
+    neigh = {}
+
+    for i in ids:
+        dists = []
+        for j in ids:
+            if i == j:
+                continue
+            dists.append((get_dist(i, j, Ddist, stops), j))
+        dists.sort(key=lambda x: x[0])
+
+        neigh[i] = [j for _, j in dists[:k]]
+
+    return neigh

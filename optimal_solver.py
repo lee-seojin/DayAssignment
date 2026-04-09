@@ -11,8 +11,9 @@ from typing import Dict, Tuple
 
 from data_type import WeekTuple, DayBits, SchedTuple, ScheduleView, Stop, DAYS_5, ALL_DAYS_7
 from data_type import TuplePools as Pools
-from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M, make_run_prefix
+from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M, make_run_prefix, build_k_neighborhood
 from optimal_medoid import solve_formulation_medoid
+from optimal_wo_balancing import solve_formulation_wo_balancing
 
 DATA_SET = "1027633" # "1042199"
 W1, W2 = 1.0, 1.0
@@ -189,27 +190,6 @@ def load_od_matrix(
                 od[(dest, origin)] = v
 
     return od
-
-
-def build_k_neighborhood(
-    ids: List[int],
-    Ddist: Dict[Tuple[int, int], float],
-    stops: Dict[int, Stop],
-    k: int = 10,
-) -> Dict[int, List[int]]:
-    neigh = {}
-
-    for i in ids:
-        dists = []
-        for j in ids:
-            if i == j:
-                continue
-            dists.append((get_dist(i, j, Ddist, stops), j))
-        dists.sort(key=lambda x: x[0])
-
-        neigh[i] = [j for _, j in dists[:k]]
-
-    return neigh
 
 
 def solve_formulation(
@@ -402,7 +382,7 @@ def main():
     Ddist = load_od_matrix(Path(f"{DATA_SET}/od.txt"))
 
     # 5) solve (new objective formulation)
-    model, chosen_tuple, changed = solve_formulation_medoid(stops=stops, pi=Pi, baseline_sched=baseline_sched,
+    model, chosen_tuple, changed = solve_formulation_wo_balancing(stops=stops, pi=Pi, baseline_sched=baseline_sched,
                                                      timecycle=timecycle, v_max=V_MAX, g_max=G_MAX, c_max=C_MAX,
                                                      Ddist=Ddist, w1=W1, w2=W2, time_limit=RUN_TIME, mip_gap=0.0)
 

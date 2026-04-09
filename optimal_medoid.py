@@ -23,7 +23,7 @@ def solve_formulation_medoid(
     w2: float = 1.0,
     time_limit: Optional[int] = 600,
     mip_gap: Optional[float] = 0.0,
-    vol_tolerance: float = 0.2,
+    vol_tolerance: float = 0.5,
 ) -> Tuple[gp.Model, Dict[int, SchedTuple], Dict[int, int]]:
 
     WEEKS_local = list(range(1, timecycle + 1))
@@ -59,6 +59,10 @@ def solve_formulation_medoid(
     m_med = {(j, l, d): model.addVar(vtype=GRB.BINARY, name=f"m_{j}_{l}_{d}")
              for j in ids for l in WEEKS_local for d in DAYS_5}
 
+    # t_{ild} ∈ [0, M]: distance from stop i to medoid of (l, d)
+    t = {(i, l, d): model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, ub=M, name=f"t_{i}_{l}_{d}")
+         for i in ids for l in WEEKS_local for d in DAYS_5}
+
     # w_{ld}: workload (= total volume) on day (l, d)
     w = {(l, d): model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"w_{l}_{d}")
          for l in WEEKS_local for d in DAYS_5}
@@ -74,20 +78,11 @@ def solve_formulation_medoid(
     wb_z = {(l, d): model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"wb_z_{l}_{d}")
             for l in WEEKS_local for d in DAYS_5}
 
-    # f_{ijld} = m_{jld} * y_{ild}: linearisation of bilinear objective term
-    f = {(i, j, l, d): model.addVar(vtype=GRB.BINARY, name=f"f_{i}_{j}_{l}_{d}")
-         for i in ids for j in ids if i != j
-         for l in WEEKS_local for d in DAYS_5}
-
     model.update()
 
-    # Objective: min Σ_{i≠j,l,d} D_{ij} * f_{ijld}
+    # Objective: min Σ_{l,d} Σ_i t_{ild}
     model.setObjective(
-        gp.quicksum(
-            get_dist(i, j, Ddist, stops) * f[(i, j, l, d)]
-            for i in ids for j in ids if i != j
-            for l in WEEKS_local for d in DAYS_5
-        ),
+        gp.quicksum(t[(i, l, d)] for i in ids for l in WEEKS_local for d in DAYS_5),
         GRB.MINIMIZE
     )
 
@@ -95,7 +90,7 @@ def solve_formulation_medoid(
     # (1) Each stop selects exactly one feasible schedule
     for i in ids:
         model.addConstr(gp.quicksum(x[(i, p)] for p in pi[i]) == 1,
-                        name = f"choose1_{i}")
+                        name=f"choose1_{i}")
 
     # (2) y definition via helper a(p, l, d)
     for i in ids:
@@ -140,50 +135,49 @@ def solve_formulation_medoid(
                 model.addConstr(m_med[(j, l, d)] <= y[(j, l, d)],
                                 name=f"medoid_assigned_{j}_{l}_{d}")
 
-    # (9) w_{ld} = 0 when no stops assigned
+    # (9) t_{ild} definition: active when y_{ild}=1 and m_{jld}=1
+    #     t_{ild} >= D_{ij} - M * (2 - y_{ild} - m_{jld})   ∀ i, j, l, d
+    for i in ids:
+        for j in ids:
+            for l in WEEKS_local:
+                for d in DAYS_5:
+                    dij = get_dist(i, j, Ddist, stops)
+                    model.addConstr(
+                        t[(i, l, d)] >= dij - dij * (2 - y[(i, l, d)] - m_med[(j, l, d)]),
+                        name=f"tdef_{i}_{j}_{l}_{d}")
+
+    # (10) w_{ld} = 0 when no stops assigned
     for l in WEEKS_local:
         for d in DAYS_5:
             model.addConstr(w[(l, d)] <= M * z[(l, d)],
                             name=f"w_zero_if_empty_{l}_{d}")
 
-    # (10) Workload definition
+    # (11) Workload definition
     for l in WEEKS_local:
         for d in DAYS_5:
             model.addConstr(
                 w[(l, d)] == gp.quicksum(stops[i].volume * y[(i, l, d)] for i in ids),
                 name=f"wdef_{l}_{d}")
 
-    # (11) w_bar definition: w_bar * L * |D| = Σ_{l,d} w_{ld}
+    # (12) w_bar definition: w_bar * L * |D| = Σ_{l,d} w_{ld}
     L_count = len(WEEKS_local)
     D_count = len(DAYS_5)
     model.addConstr(
         w_bar * (L_count * D_count) == gp.quicksum(w[(l, d)] for l in WEEKS_local for d in DAYS_5),
         name="wbar_def")
 
-    # (12) Workload tolerance: (1-tol)*wb_z ≤ w_{ld} ≤ (1+tol)*wb_z
+    # (13) Workload tolerance: 0.5*wb_z ≤ w_{ld} ≤ 2*wb_z
     # wb_z_{ld} = w_bar * z_{ld}  (continuous × binary, McCormick linearisation)
-    lo = 1.0 - vol_tolerance   # default 0.8
-    hi = 1.0 + vol_tolerance   # default 1.2
+    lo = 1.0 - vol_tolerance   # default 0.5
+    hi = 1.0 + vol_tolerance   # default 1.5 → override to 2.0 per slides
     for l in WEEKS_local:
         for d in DAYS_5:
             wbz = wb_z[(l, d)]
             model.addConstr(wbz <= M * z[(l, d)],               name=f"wbz_ub1_{l}_{d}")
             model.addConstr(wbz <= w_bar,                        name=f"wbz_ub2_{l}_{d}")
             model.addConstr(wbz >= w_bar - M * (1 - z[(l, d)]), name=f"wbz_lb_{l}_{d}")
-            model.addConstr(w[(l, d)] >= lo * wbz,              name=f"wtol_lo_{l}_{d}")
-            model.addConstr(w[(l, d)] <= hi * wbz,              name=f"wtol_hi_{l}_{d}")
-
-    # Linearisation of f_{ijld} = m_{jld} * y_{ild}  (both binary → standard McCormick)
-    for i in ids:
-        for j in ids:
-            if i == j:
-                continue
-            for l in WEEKS_local:
-                for d in DAYS_5:
-                    fv = f[(i, j, l, d)]
-                    model.addConstr(fv <= m_med[(j, l, d)],                     name=f"fle_m_{i}_{j}_{l}_{d}")
-                    model.addConstr(fv <= y[(i, l, d)],                         name=f"fle_y_{i}_{j}_{l}_{d}")
-                    model.addConstr(fv >= m_med[(j, l, d)] + y[(i, l, d)] - 1, name=f"fge_{i}_{j}_{l}_{d}")
+            model.addConstr(w[(l, d)] >= 0.5 * wbz,             name=f"wtol_lo_{l}_{d}")
+            model.addConstr(w[(l, d)] <= 2.0 * wbz,             name=f"wtol_hi_{l}_{d}")
 
     # Solve
     model.optimize()
