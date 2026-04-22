@@ -211,55 +211,6 @@ def build_priority_map(
 
     return priority_map
 
-# OD loader
-def load_od_matrix(
-    od_path: Path,
-    value: str = "dist",          # "dist" or "time"
-    assume_symmetric: bool = False
-) -> Dict[Tuple[int, int], float]:
-
-    od: Dict[Tuple[int, int], float] = {}
-    if not od_path.exists():
-        return od
-
-    with od_path.open("r", encoding="utf-8", errors="ignore") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line:
-                continue
-            # header line can appear mid-file
-            if "Origin ID" in line or "Route Type" in line:
-                continue
-
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 4:
-                continue
-
-            # robust parsing from tail
-            try:
-                origin = int(parts[-4])
-                dest   = int(parts[-3])
-                time_s = float(parts[-2])
-                dist_c = float(parts[-1])
-            except ValueError:
-                continue
-
-            # dist can be missing in some lines (empty string -> ValueError already handled)
-            if value == "dist":
-                v = dist_c
-            else:
-                v = time_s
-
-            if not math.isfinite(v):
-                continue
-
-            od[(origin, dest)] = v
-            if assume_symmetric:
-                od[(dest, origin)] = v
-
-    return od
-
-
 # Save / Load Data
 def save_artifacts(out_dir: Path, artifacts: dict) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -272,19 +223,21 @@ def save_artifacts(out_dir: Path, artifacts: dict) -> Path:
 # main builder
 def build_inputs_and_cache(
     params_path: Path,
-    od_dir: Path,
+    stops_path: Path,
+    darules_path: Path,
+    od_source: Path,
     out_dir: Path,
 ) -> dict:
 
     pools = TuplePools()
     params = load_params(params_path)
 
-    if params["timecycle"] != 4:
-        raise ValueError("This pipeline assumes timecycle=4.")
+    """if params["timecycle"] != 4:
+        raise ValueError("This pipeline assumes timecycle=4.")"""
 
-    darules_map = load_darules(Path(f'./{DATA_SET}/darules.txt'), pools)
+    darules_map = load_darules(darules_path, pools)
 
-    aggr = aggregate_stops(Path(f'./{DATA_SET}/stops.txt'))
+    aggr = aggregate_stops(stops_path)
     stops, baseline_sched = build_stops_and_baseline(aggr, pools)
 
     dowcd_set = set([s.dowcd for s in stops.values()])
@@ -292,7 +245,7 @@ def build_inputs_and_cache(
     sched_cache = build_feasible_sched(pools, darules_map, dowcd_set, freq_set)
     priority_map = build_priority_map(pools, darules_map, aggr["dowcd"], aggr["frequency"])
 
-    Ddist = load_od_matrix(od_dir)
+    Ddist = load_od_matrix_flexible(od_source)
 
     n = len(stops)
     C_max = int(round(params["MAX_PCT_DAY_CHANGES"] / 100.0 * n))
@@ -322,11 +275,107 @@ def build_inputs_and_cache(
 
     return artifacts
 
+from pathlib import Path
+from typing import Dict, Tuple
+import math
+
+
+def resolve_dataset_paths(dataset_name: str) -> dict:
+    dataset_dir = Path(f"./{dataset_name}")
+    od_file = dataset_dir / "od.txt"
+    od_dir = Path(f"./{dataset_name}_OD")
+
+    stops_path = dataset_dir / "stops.txt"
+    params_path = dataset_dir / "params.txt"
+    darules_path = dataset_dir / "darules.txt"
+
+    if not stops_path.exists():
+        raise FileNotFoundError(f"stops.txt not found: {stops_path}")
+    if not params_path.exists():
+        raise FileNotFoundError(f"params.txt not found: {params_path}")
+    if not darules_path.exists():
+        raise FileNotFoundError(f"darules.txt not found: {darules_path}")
+
+    if od_file.exists():
+        od_source = od_file
+    elif od_dir.exists():
+        od_source = od_dir
+    else:
+        raise FileNotFoundError(f"No OD source found for dataset {dataset_name}")
+
+    return {
+        "dataset_dir": dataset_dir,
+        "stops_path": stops_path,
+        "params_path": params_path,
+        "darules_path": darules_path,
+        "od_source": od_source,
+    }
+
+
+def load_od_matrix_flexible(
+    od_source: Path,
+    value: str = "dist",
+    assume_symmetric: bool = False,
+) -> Dict[Tuple[int, int], float]:
+
+    od: Dict[Tuple[int, int], float] = {}
+
+    def _read_one_file(path: Path):
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+                if "Origin ID" in line or "Route Type" in line:
+                    continue
+
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 4:
+                    continue
+
+                try:
+                    origin = int(parts[-4])
+                    dest = int(parts[-3])
+                    time_s = float(parts[-2])
+                    dist_c = float(parts[-1])
+                except ValueError:
+                    continue
+
+                v = dist_c if value == "dist" else time_s
+                if not math.isfinite(v):
+                    continue
+
+                od[(origin, dest)] = v
+                if assume_symmetric:
+                    od[(dest, origin)] = v
+
+    od_source = Path(od_source)
+
+    if od_source.is_file():
+        _read_one_file(od_source)
+
+    elif od_source.is_dir():
+        files = sorted(od_source.glob("od_NoPenalty*.txt"))
+        if not files:
+            raise FileNotFoundError(f"No od_NoPenalty*.txt files found in {od_source}")
+        for f in files:
+            _read_one_file(f)
+
+    else:
+        raise FileNotFoundError(f"Invalid OD source: {od_source}")
+
+    return od
+
 
 if __name__ == "__main__":
 
-    PARAMS_PATH = Path(f"{DATA_SET}/params.txt")
-    OD_DIR = Path(f"{DATA_SET}/od.txt")
+    paths = resolve_dataset_paths(DATA_SET)
     OUT_DIR = Path("baseline_data_store")
 
-    build_inputs_and_cache(PARAMS_PATH, OD_DIR, OUT_DIR)
+    build_inputs_and_cache(
+        paths["params_path"],
+        paths["stops_path"],
+        paths["darules_path"],
+        paths["od_source"],
+        OUT_DIR,
+    )

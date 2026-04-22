@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import pickle
 from typing import Dict, List, Tuple, Optional, Iterable
 import itertools
 import pandas as pd
@@ -15,182 +16,49 @@ from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M, make_run_prefix, bu
 from optimal_medoid import solve_formulation_medoid
 from optimal_wo_balancing import solve_formulation_wo_balancing
 
-DATA_SET = "1027633" # "1042199"
+DATA_SET = "1042199" # "1004812" # "1027633"
 W1, W2 = 1.0, 1.0
-RUN_TIME = 60*20
+RUN_TIME = 60*10
 
-# Load params + darules (exactly from your files)
-def load_params(params_path: Path):
-    p = pd.read_csv(params_path, sep="\t").iloc[0]
+def load_artifacts(pkl_path: Path) -> dict:
+    with pkl_path.open("rb") as f:
+        return pickle.load(f)
 
-    return {
-        "timecycle": int(p["timecycle"]),
-        "V_MAX": float(p["maxvolperday"]),
-        "G_MAX": float(p["maxweightperday"]),
-        "MAX_PCT_DAY_CHANGES": float(p["maxpctdaychanges"]),
-        "stop_file": str(p["stop_file"]),
-        "da_rules_file": str(p["da_rules_file"]),
-    }
+def build_pi_from_artifacts(
+    stops: Dict[int, Stop],
+    sched_cache: Dict[Tuple[str, int], List[SchedTuple]],
+    baseline_sched: Dict[int, SchedTuple],
+) -> Dict[int, List[SchedTuple]]:
+    pi: Dict[int, List[SchedTuple]] = {}
 
-def load_darules(darules_path: Path, pools: Pools) -> Dict[int, List[DayBits]]:
-    """
-    Output: Dictionary[key: frequency, value: list of feasible days combinations]
-    """
-    df = pd.read_csv(darules_path,
-                     sep="\t",
-                     usecols=["freq", "mon", "tue", "wed", "thu", "fri", "sat", "sun"])
-    df.columns = [c.strip().lower() for c in df.columns]
+    for i, s in stops.items():
+        key = (str(s.dowcd).strip().upper(), int(s.frequency))
+        if key not in sched_cache:
+            raise KeyError(f"Missing sched_cache entry for key={key}, stop={i}")
 
-    out: Dict[int, List[DayBits]] = {}
-    for _, r in df.iterrows():
-        f = int(r["freq"])
-        bits: DayBits = (int(r["mon"]), int(r["tue"]), int(r["wed"]), int(r["thu"]),
-                         int(r["fri"]), int(r["sat"]), int(r["sun"]))
-        out.setdefault(f, [])
-        out[f].append(pools.day(bits))
+        sched_opts = list(sched_cache[key])
+        base = baseline_sched[i]
 
-    return out
-
-
-# dowcd rules (TimeCycle=4 only as you requested)
-def dowcd_to_weektuple(dowcd: str, pools: Pools) -> WeekTuple:
-    s = str(dowcd).strip().upper()
-    if s in {"1", "2", "3", "4"}:
-        return pools.week([int(s)])
-    if s == "O":
-        return pools.week([1, 3])
-    if s == "E":
-        return pools.week([2, 4])
-    if s == "A":
-        return pools.week([1, 2, 3, 4])
-    raise ValueError(f"Unknown dowcd: {dowcd}")
-
-
-def week_options_from_dowcd(dowcd: str, pools: Pools) -> List[WeekTuple]:
-    s = str(dowcd).strip().upper()
-    if s in {"1", "2", "3", "4"}:
-        return [pools.week([1]), pools.week([2]), pools.week([3]), pools.week([4])]
-    if s in {"O", "E"}:
-        return [pools.week([1, 3]), pools.week([2, 4])]
-    if s == "A":
-        return [pools.week([1, 2, 3, 4])]
-    raise ValueError(f"Unknown dowcd: {dowcd}")
-
-
-# Build Stop objects + feasible schedules (tuple-pool shared)
-def daybits_from_bef_row(r: pd.Series, pools: Pools) -> DayBits:
-    bits5 = [int(r[f"BEF_{d}"]) for d in DAYS_5]   # MON..FRI
-    bits7: DayBits = tuple(bits5 + [0, 0])       # SAT,SUN = 0
-    return pools.day(bits7)
-
-
-def day_options_for_stop(freq: int, baseline_bits: DayBits, darules_map: Dict[int, List[DayBits]]) -> List[DayBits]:
-    """
-    Rule (2): same-freq darules patterns + baseline always included (even if not in darules)
-    """
-    opts = list(darules_map.get(freq, []))
-    if baseline_bits not in opts:
-        opts.append(baseline_bits)
-
-    return opts
-
-
-def build_stops_and_pi(aggr: pd.DataFrame, pools: Pools, darules_map: Dict[int, List[DayBits]]) \
-        -> Tuple[Dict[int, Stop], Dict[int, List[SchedTuple]], Dict[int, SchedTuple]]:
-
-    stops: Dict[int, Stop] = {}
-    pi: Dict[int, List[SchedTuple]] = {}  # key: custno / value: feasible schedule options
-    baseline_sched: Dict[int, SchedTuple] = {}  # key: custno / value: primary, baseline schedule
-
-    for _, r in aggr.iterrows():
-        custno = int(r["custno"])
-        freq = int(r["frequency"])
-        baseline_day = daybits_from_bef_row(r, pools)
-        baseline_week = dowcd_to_weektuple(str(r["dowcd"]), pools)
-
-        # feasible day / week options
-        day_opts = day_options_for_stop(freq, baseline_day, darules_map)
-        week_opts = week_options_from_dowcd(str(r["dowcd"]), pools)
-
-        # schedules as pooled tuples
-        sched_opts = [pools.schedule(w, d) for (w, d) in itertools.product(week_opts, day_opts)]
-        base = pools.schedule(baseline_week, baseline_day)
         if base not in sched_opts:
             sched_opts.append(base)
 
-        pi[custno] = sched_opts
-        baseline_sched[custno] = base
+        pi[i] = sched_opts
 
-        # Stop class holds “view” for baseline; chosen later
-        s = Stop(
-            custno=custno,
-            xcoord=float(r["xcoord"]),
-            ycoord=float(r["ycoord"]),
-            qty=float(r["qty"]),
-            volume=float(r["volume"]),
-            weight=float(r["weight"]),
-            sos=int(r["sos"]),
-            dowcd=str(r["dowcd"]),
-            dowlockcd=int(r["dowlockcd"]),
-            wccd_flag=int(r["wccd_flag"]),
-            material_typ=str(r["material_typ"]) if ("material_typ" in aggr.columns and pd.notna(r["material_typ"])) else None,
-            clusterid=int(r["clusterid"]) if ("clusterid" in aggr.columns and pd.notna(r["clusterid"])) else None,
-            frequency=freq,
-            baseline=ScheduleView(baseline_week, baseline_day),
-        )
-        stops[custno] = s
+    return pi
 
-    return stops, pi, baseline_sched
+def filter_by_dowcd_A(
+    stops: Dict[int, Stop],
+    baseline_sched: Dict[int, SchedTuple],
+):
+    selected_ids = {
+        i for i, s in stops.items()
+        if str(s.dowcd).strip().upper() == "A"
+    }
 
+    stops_f = {i: s for i, s in stops.items() if i in selected_ids}
+    baseline_f = {i: p for i, p in baseline_sched.items() if i in selected_ids}
 
-# Distance matrix (Euclidean)
-def load_od_matrix(
-    od_path: Path,
-    value: str = "dist",          # "dist" or "time"
-    assume_symmetric: bool = False
-) -> Dict[Tuple[int, int], float]:
-
-    od: Dict[Tuple[int, int], float] = {}
-    if not od_path.exists():
-        return od
-
-    with od_path.open("r", encoding="utf-8", errors="ignore") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line:
-                continue
-            # header line can appear mid-file
-            if "Origin ID" in line or "Route Type" in line:
-                continue
-
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 4:
-                continue
-
-            # robust parsing from tail
-            try:
-                origin = int(parts[-4])
-                dest   = int(parts[-3])
-                time_s = float(parts[-2])
-                dist_c = float(parts[-1])
-            except ValueError:
-                continue
-
-            # dist can be missing in some lines (empty string -> ValueError already handled)
-            if value == "dist":
-                v = dist_c
-            else:
-                v = time_s
-
-            if not math.isfinite(v):
-                continue
-
-            od[(origin, dest)] = v
-            if assume_symmetric:
-                od[(dest, origin)] = v
-
-    return od
-
+    return stops_f, baseline_f
 
 def solve_formulation(
     stops: Dict[int, Stop],
@@ -352,82 +220,88 @@ def solve_formulation(
 def _weektuple_to_str(weekt):
     return ",".join(str(int(x)) for x in weekt)   # (1,3) -> "1,3"
 
-# Main
 def main():
-    PARAMS_PATH = Path(f"{DATA_SET}/params.txt")
+    artifacts_path = Path("baseline_data_store") / f"{DATA_SET}_artifacts.pkl"
+    artifacts = load_artifacts(artifacts_path)
 
-    params = load_params(PARAMS_PATH)
-    timecycle = params["timecycle"]
+    params = artifacts["params"]
+    timecycle = artifacts["timecycle"]
     V_MAX = params["V_MAX"]
     G_MAX = params["G_MAX"]
-    max_pct = params["MAX_PCT_DAY_CHANGES"]
+    C_MAX = artifacts["C_max"]
 
-    # 1) aggregate raw stops -> stop-level with BEF_* + frequency
-    aggr = pd.read_csv(f"{DATA_SET}/{DATA_SET}_stops_aggregated.csv")
+    stops: Dict[int, Stop] = artifacts["stops"]
+    baseline_sched: Dict[int, SchedTuple] = artifacts["baseline_sched"]
+    sched_cache: Dict[Tuple[str, int], List[SchedTuple]] = artifacts["sched_cache"]
+    Ddist: Dict[Tuple[int, int], float] = artifacts["Ddist"]
 
-    pools = Pools()
+    stops, baseline_sched = filter_by_dowcd_A(stops, baseline_sched)
+    Pi = build_pi_from_artifacts(stops, sched_cache, baseline_sched)
 
-    # 2) read darules (freq -> pooled daybits)
-    darules_path = Path(f"{DATA_SET}/darules.txt")
-    darules_map = load_darules(darules_path, pools)
+    model, chosen_tuple, changed = solve_formulation_medoid(
+        stops=stops,
+        pi=Pi,
+        baseline_sched=baseline_sched,
+        timecycle=timecycle,
+        v_max=V_MAX,
+        g_max=G_MAX,
+        c_max=C_MAX,
+        Ddist=Ddist,
+        w1=W1,
+        w2=W2,
+        time_limit=RUN_TIME,
+        mip_gap=0.0,
+    )
 
-    # 3) build Stop objects + Pi (tuple schedules) + baseline schedule tuple
-    stops, Pi, baseline_sched = build_stops_and_pi(aggr, pools, darules_map)
-
-    n = len(stops)
-    K_NEIGH = max(10, int(0.3 * n))
-    C_MAX = int(round(max_pct / 100.0 * n))
-
-    # 4) distances (Euclidean)
-    Ddist = load_od_matrix(Path(f"{DATA_SET}/od.txt"))
-
-    # 5) solve (new objective formulation)
-    model, chosen_tuple, changed = solve_formulation_wo_balancing(stops=stops, pi=Pi, baseline_sched=baseline_sched,
-                                                     timecycle=timecycle, v_max=V_MAX, g_max=G_MAX, c_max=C_MAX,
-                                                     Ddist=Ddist, w1=W1, w2=W2, time_limit=RUN_TIME, mip_gap=0.0)
-
-    # 6) write chosen schedules back to Stop class (final layer = class)
     for s in stops.values():
         w_t, d_b = chosen_tuple[s.custno]
         s.chosen = ScheduleView(w_t, d_b)
         s.changed = changed[s.custno]
 
-    # 7) export in the same column structures with heuristic
     rows = []
 
     for s in stops.values():
-
         base_week = s.baseline.week_tuple
         base_day = s.baseline.day_bits
         ch_week = s.chosen.week_tuple
         ch_day = s.chosen.day_bits
 
         for l in range(1, timecycle + 1):
-
-            # 이 week에 방문하는지
             active = (l in ch_week)
-
             if not active:
                 continue
+
+            def weektuple_to_dowcd(wt) -> str:
+                weeks = tuple(sorted(int(x) for x in wt))
+                if weeks == (1, 2, 3, 4):
+                    return "A"
+                if weeks == (1, 3):
+                    return "O"
+                if weeks == (2, 4):
+                    return "E"
+                if len(weeks) == 1:
+                    return str(weeks[0])
+                return ",".join(str(w) for w in weeks)
 
             row = {
                 "WEEK#": l,
                 "STOP ID": s.custno,
-                "PIECES": float(s.qty),
+                "PIECES": float(s.qty) if s.qty is not None else None,
                 "VOLUME": float(s.volume),
+                "BEF_WK_CD": weektuple_to_dowcd(base_week),
+                "AFT_WK_CD": weektuple_to_dowcd(ch_week),
+                "WK_FREQUENCY": int(s.frequency),
             }
 
-            # BEFORE (baseline)
             for idx, d in enumerate(ALL_DAYS_7):
-                col = f"BEF_{d}"
-                row[col] = int(base_day[idx]) if l in base_week else 0
+                row[f"BEF_{d}"] = int(base_day[idx]) if l in base_week else 0
 
-            # AFTER (chosen)
             for idx, d in enumerate(ALL_DAYS_7):
-                col = f"AFT_{d}"
-                row[col] = int(ch_day[idx]) if l in ch_week else 0
+                row[f"AFT_{d}"] = int(ch_day[idx]) if l in ch_week else 0
 
             row["CHANGED"] = int(s.changed)
+            row["XCOORD"] = float(s.xcoord)
+            row["YCOORD"] = float(s.ycoord)
 
             rows.append(row)
 
@@ -436,15 +310,18 @@ def main():
     out_path = out_dir / f"{make_run_prefix(DATA_SET)}_resultdetail.csv"
     df = pd.DataFrame(rows)
 
-    # 컬럼 순서 맞추기
-    cols = ["WEEK#", "STOP ID", "PIECES", "VOLUME"] + \
-           [f"BEF_{d}" for d in ALL_DAYS_7] + \
-           [f"AFT_{d}" for d in ALL_DAYS_7] + \
-           ["CHANGED"]
+    cols = [
+        "WEEK#", "STOP ID", "PIECES", "VOLUME",
+        "BEF_WK_CD", "AFT_WK_CD", "WK_FREQUENCY"
+    ] + [f"BEF_{d}" for d in ALL_DAYS_7] \
+      + [f"AFT_{d}" for d in ALL_DAYS_7] \
+      + ["CHANGED", "XCOORD", "YCOORD"]
 
     df = df[cols]
     df.to_csv(out_path, index=False, encoding="utf-8-sig")
 
+    print(f"Loaded artifacts: {artifacts_path}")
+    print(f"Stops: {len(stops)}")
     print(f"Saved: {out_path}")
 
 if __name__ == "__main__":

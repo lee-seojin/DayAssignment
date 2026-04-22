@@ -76,7 +76,8 @@ def build_p_from_result_csv(csv_path: Path) -> Dict[int, SchedTuple]:
 
 def _get_visited(artifacts: dict, p: Dict[int, SchedTuple]) -> dict:
     """(l,d)별 배정된 stop 목록 반환 (공통 전처리)"""
-    ids = list(artifacts["stops"].keys())
+    #ids = list(artifacts["stops"].keys())
+    ids = list(p.keys())
     visited = {(l, d): [] for l in WEEKS for d in DAYS_5}
     for i in ids:
         for l in WEEKS:
@@ -129,7 +130,7 @@ def compute_mssc_objective(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
 
 def main():
     ARTIFACTS_PATH = Path("baseline_data_store/1027633_artifacts.pkl")
-    RESULT_CSV     = Path("./results_optimal/1027633_20260408_144517_resultdetail.csv")
+    RESULT_CSV     = Path("./results_optimal/1027633_20260422_123226_resultdetail.csv")
 
     artifacts = load_artifacts(ARTIFACTS_PATH)
     baseline_sched: Dict[int, SchedTuple] = artifacts["baseline_sched"]
