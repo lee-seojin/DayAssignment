@@ -3,6 +3,8 @@ from typing import Dict, Tuple
 import math
 from datetime import datetime
 from typing import List
+from pathlib import Path
+import pickle
 
 def a(schedule: SchedTuple, l: int, d: str) -> int:
     """schedule이 (week=l, day=d)에 방문하면 1 else 0"""
@@ -129,3 +131,30 @@ def build_k_neighborhood(
         neigh[i] = [j for _, j in dists[:k]]
 
     return neigh
+
+
+def load_artifacts(pkl_path: Path) -> dict:
+    with pkl_path.open("rb") as f:
+        return pickle.load(f)
+
+def build_pi_from_artifacts(
+    stops: Dict[int, Stop],
+    sched_cache: Dict[Tuple[str, int], List[SchedTuple]],
+    baseline_sched: Dict[int, SchedTuple],
+) -> Dict[int, List[SchedTuple]]:
+    pi: Dict[int, List[SchedTuple]] = {}
+
+    for i, s in stops.items():
+        key = (str(s.dowcd).strip().upper(), int(s.frequency))
+        if key not in sched_cache:
+            raise KeyError(f"Missing sched_cache entry for key={key}, stop={i}")
+
+        sched_opts = list(sched_cache[key])
+        base = baseline_sched[i]
+
+        if base not in sched_opts:
+            sched_opts.append(base)
+
+        pi[i] = sched_opts
+
+    return pi
