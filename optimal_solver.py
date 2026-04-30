@@ -14,7 +14,7 @@ from optimal_medoid import solve_formulation_medoid
 from optimal_wo_balancing import solve_formulation_wo_balancing
 from optimal_rectangle import solve_formulation_rectangle
 
-DATA_SET = "1004812" #"1042199" # "1027633"
+DATA_SET = "1004812" # "1042199" # "1027633"
 W1, W2 = 1.0, 1.0
 RUN_TIME = 60*100
 

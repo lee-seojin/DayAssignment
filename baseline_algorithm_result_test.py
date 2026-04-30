@@ -7,7 +7,7 @@ import pandas as pd
 
 from helper_funcs import load_artifacts, a, get_dist, WEEKS, DAYS_5
 from data_type import WeekTuple, DayBits, SchedTuple, TuplePools
-
+from shapely.geometry import MultiPoint
 
 # CSV parsing
 def parse_week_value(x) -> WeekTuple:
@@ -212,7 +212,67 @@ def compute_rectangle_objective(
     rect_term = compute_rectangle_size_term(artifacts, p)
     overlap_term = compute_rectangle_overlap_term(artifacts, p)
     obj = w1 * rect_term + w2 * overlap_term
+
     return obj, rect_term, overlap_term
+
+def compute_nho_metric(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
+    stops = artifacts["stops"]
+    visited = _get_visited(artifacts, p)
+    timecycle = int(artifacts["timecycle"])
+    weeks_local = list(range(1, timecycle + 1))
+    day_pairs = list(itertools.combinations(DAYS_5, 2))   # d < e only
+
+    week_nho_values = []
+
+    for l in weeks_local:
+        hulls = {}
+        active_days = []
+
+        for d in DAYS_5:
+            ids_cell = visited[(l, d)]
+            if len(ids_cell) < 3:
+                # 점이 2개 이하이면 polygon area가 0: NHO 계산 대상에서 제외
+                hulls[d] = None
+                continue
+
+            pts = [(float(stops[i].xcoord), float(stops[i].ycoord)) for i in ids_cell]
+            hull = MultiPoint(pts).convex_hull
+
+            # convex_hull이 Polygon이 아니거나 면적이 0이면 제외
+            if hull.geom_type != "Polygon" or hull.area <= 0:
+                hulls[d] = None
+                continue
+
+            hulls[d] = hull
+            active_days.append(d)
+
+        n_active = len(active_days)
+        if n_active < 2:
+            week_nho_values.append(0.0)
+            continue
+
+        directed_overlap_sum = 0.0
+
+        for d, e in day_pairs:
+            hd = hulls.get(d)
+            he = hulls.get(e)
+            if hd is None or he is None:
+                continue
+
+            inter_area = hd.intersection(he).area
+            if inter_area <= 0:
+                continue
+
+            directed_overlap_sum += inter_area / hd.area
+            directed_overlap_sum += inter_area / he.area
+
+        nho_l = directed_overlap_sum / (n_active * (n_active - 1))
+        week_nho_values.append(nho_l)
+
+    if not week_nho_values:
+        return 0.0
+
+    return sum(week_nho_values) / len(week_nho_values)
 
 
 # Main
@@ -234,6 +294,9 @@ def main():
         mssc = compute_mssc_objective(artifacts, p)
         print(f"[{label}]  MSSC            = {mssc:>15,.2f}")
 
+        nho = compute_nho_metric(artifacts, p)
+        print(f"[{label}]  NHO             = {nho:>15,.6f}")
+
         rect_obj, rect_term, overlap_term = compute_rectangle_objective(
             artifacts, p, w1=W1, w2=W2
         )
@@ -252,6 +315,11 @@ def main():
     mssc_o = compute_mssc_objective(artifacts, p_optimal)
     if mssc_b != 0:
         print(f"[MSSC improvement]        {(mssc_b - mssc_o) / mssc_b * 100:.2f}%")
+
+    nho_b = compute_nho_metric(artifacts, baseline_sched)
+    nho_o = compute_nho_metric(artifacts, p_optimal)
+    if nho_b != 0:
+        print(f"[NHO improvement]         {(nho_b - nho_o) / nho_b * 100:.2f}%")
 
     rect_b, rect_size_b, overlap_b = compute_rectangle_objective(artifacts, baseline_sched, w1=W1, w2=W2)
     rect_o, rect_size_o, overlap_o = compute_rectangle_objective(artifacts, p_optimal, w1=W1, w2=W2)

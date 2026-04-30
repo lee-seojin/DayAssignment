@@ -76,6 +76,18 @@ def solve_formulation_rectangle(
     y2_lde = {(l, d, e): model.addVar(vtype=GRB.CONTINUOUS, lb=YMIN, ub=YMAX, name=f"y2_{l}_{d}_{e}")
               for l in WEEKS_local for d, e in day_pairs}
 
+    # m^x_lde, m^y_lde for min selectors
+    m_x_lde = {(l, d, e): model.addVar(vtype=GRB.BINARY, name=f"mx_{l}_{d}_{e}")
+               for l in WEEKS_local for d, e in day_pairs}
+    m_y_lde = {(l, d, e): model.addVar(vtype=GRB.BINARY, name=f"my_{l}_{d}_{e}")
+               for l in WEEKS_local for d, e in day_pairs}
+
+    # M^x_lde, M^y_lde for max selectors
+    M_x_lde = {(l, d, e): model.addVar(vtype=GRB.BINARY, name=f"Mx_{l}_{d}_{e}")
+               for l in WEEKS_local for d, e in day_pairs}
+    M_y_lde = {(l, d, e): model.addVar(vtype=GRB.BINARY, name=f"My_{l}_{d}_{e}")
+               for l in WEEKS_local for d, e in day_pairs}
+
     # w_lde^x, w_lde^y, w_lde^c
     wx_lde = {(l, d, e): model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"wx_{l}_{d}_{e}")
               for l in WEEKS_local for d, e in day_pairs}
@@ -96,8 +108,9 @@ def solve_formulation_rectangle(
 
     # Objective Function
     rect_size = gp.quicksum(
-        (x2_ld[(l, d)] - x1_ld[(l, d)]) + (y2_ld[(l, d)] - y1_ld[(l, d)])
-        for l in WEEKS_local for d in DAYS_5
+        #(x2_ld[(l, d)] - x1_ld[(l, d)]) + (y2_ld[(l, d)] - y1_ld[(l, d)])
+        (x2_ld[(l, d)] - x1_ld[(l, d)]) * (y2_ld[(l, d)] - y1_ld[(l, d)])
+    for l in WEEKS_local for d in DAYS_5
     )
 
     overlap_size = gp.quicksum(
@@ -199,15 +212,47 @@ def solve_formulation_rectangle(
         for d, e in day_pairs:
             model.addConstr(x1_lde[(l, d, e)] <= x1_ld[(l, d)], name=f"x1lde_d_{l}_{d}_{e}")
             model.addConstr(x1_lde[(l, d, e)] <= x1_ld[(l, e)], name=f"x1lde_e_{l}_{d}_{e}")
+            model.addConstr(
+                x1_lde[(l, d, e)] >= x1_ld[(l, d)] - MX * (1 - m_x_lde[(l, d, e)]),
+                name=f"x1ge_1_{l}_{d}_{e}"
+            )
+            model.addConstr(
+                x1_lde[(l, d, e)] >= x1_ld[(l, e)] - MX * m_x_lde[(l, d, e)],
+                name=f"x1ge_2_{l}_{d}_{e}"
+            )
 
             model.addConstr(y1_lde[(l, d, e)] <= y1_ld[(l, d)], name=f"y1lde_d_{l}_{d}_{e}")
             model.addConstr(y1_lde[(l, d, e)] <= y1_ld[(l, e)], name=f"y1lde_e_{l}_{d}_{e}")
+            model.addConstr(
+                y1_lde[(l, d, e)] >= y1_ld[(l, d)] - MY * (1 - m_y_lde[(l, d, e)]),
+                name=f"y1ge_1_{l}_{d}_{e}"
+            )
+            model.addConstr(
+                y1_lde[(l, d, e)] >= y1_ld[(l, e)] - MY * m_y_lde[(l, d, e)],
+                name=f"y1ge_2_{l}_{d}_{e}"
+            )
 
             model.addConstr(x2_lde[(l, d, e)] >= x2_ld[(l, d)], name=f"x2lde_d_{l}_{d}_{e}")
             model.addConstr(x2_lde[(l, d, e)] >= x2_ld[(l, e)], name=f"x2lde_e_{l}_{d}_{e}")
+            model.addConstr(
+                x2_lde[(l, d, e)] <= x2_ld[(l, d)] + MX * (1 - M_x_lde[(l, d, e)]),
+                name=f"x2le_1_{l}_{d}_{e}"
+            )
+            model.addConstr(
+                x2_lde[(l, d, e)] <= x2_ld[(l, e)] + MX * M_x_lde[(l, d, e)],
+                name=f"x2le_2_{l}_{d}_{e}"
+            )
 
             model.addConstr(y2_lde[(l, d, e)] >= y2_ld[(l, d)], name=f"y2lde_d_{l}_{d}_{e}")
             model.addConstr(y2_lde[(l, d, e)] >= y2_ld[(l, e)], name=f"y2lde_e_{l}_{d}_{e}")
+            model.addConstr(
+                y2_lde[(l, d, e)] <= y2_ld[(l, d)] + MY * (1 - M_y_lde[(l, d, e)]),
+                name=f"y2le_1_{l}_{d}_{e}"
+            )
+            model.addConstr(
+                y2_lde[(l, d, e)] <= y2_ld[(l, e)] + MY * M_y_lde[(l, d, e)],
+                name=f"y2le_2_{l}_{d}_{e}"
+            )
 
             model.addConstr(x2_lde[(l, d, e)] >= x1_lde[(l, d, e)], name=f"xpair_order_{l}_{d}_{e}")
             model.addConstr(y2_lde[(l, d, e)] >= y1_lde[(l, d, e)], name=f"ypair_order_{l}_{d}_{e}")
@@ -264,7 +309,8 @@ def solve_formulation_rectangle(
     for l in WEEKS_local:
         for d, e in day_pairs:
             model.addConstr(
-                wc_lde[(l, d, e)] >= wx_lde[(l, d, e)] + wy_lde[(l, d, e)] - MWC * (1 - oc_lde[(l, d, e)]),
+                # wc_lde[(l, d, e)] >= wx_lde[(l, d, e)] + wy_lde[(l, d, e)] - MWC * (1 - oc_lde[(l, d, e)]),
+                wc_lde[(l, d, e)] >= wx_lde[(l, d, e)] * wy_lde[(l, d, e)] - MWC * (1 - oc_lde[(l, d, e)]),
                 name=f"wc_{l}_{d}_{e}"
             )
 
@@ -291,8 +337,24 @@ def solve_formulation_rectangle(
         wc_lde[(l, d, e)].X for l in WEEKS_local for d, e in day_pairs
     )
 
-    print(f"[MODEL] RECT_SIZE term = {rect_term_val:.6f}")
+    """
+    print(f"\n[MODEL] RECT_SIZE term = {rect_term_val:.6f}")
     print(f"[MODEL] OVERLAP term   = {overlap_term_val:.6f}")
-    print(f"[MODEL] RECT_OBJ       = {w1*rect_term_val + w2*overlap_term_val:.6f}")
+    print(f"[MODEL] RECT_OBJ kk      = {w1*rect_term_val + w2*overlap_term_val:.6f}\n")
+
+    print("\n[MODEL RECTANGLE / OVERLAP CHECK]")
+    for l in WEEKS_local:
+        for d, e in day_pairs:
+            print(f"\n({l}, {d}, {e})")
+            print(f"  x_ld  = ({x1_ld[(l, d)].X:.6f}, {x2_ld[(l, d)].X:.6f})")
+            print(f"  x_le  = ({x1_ld[(l, e)].X:.6f}, {x2_ld[(l, e)].X:.6f})")
+            print(f"  x_lde = ({x1_lde[(l, d, e)].X:.6f}, {x2_lde[(l, d, e)].X:.6f})")
+            print(f"  y_ld  = ({y1_ld[(l, d)].X:.6f}, {y2_ld[(l, d)].X:.6f})")
+            print(f"  y_le  = ({y1_ld[(l, e)].X:.6f}, {y2_ld[(l, e)].X:.6f})")
+            print(f"  y_lde = ({y1_lde[(l, d, e)].X:.6f}, {y2_lde[(l, d, e)].X:.6f})")
+            #print(f"  wx={wx_lde[(l, d, e)].X:.6f}, wy={wy_lde[(l, d, e)].X:.6f}, wc={wc_lde[(l, d, e)].X:.6f}")
+            #print(f"  ox={ox_lde[(l, d, e)].X:.0f}, oy={oy_lde[(l, d, e)].X:.0f}, oc={oc_lde[(l, d, e)].X:.0f}")
+            
+            """
 
     return model, chosen_tuple, changed_map
