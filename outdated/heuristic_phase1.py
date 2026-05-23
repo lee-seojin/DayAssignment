@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple, Optional
 
 from data_type import Stop, SchedTuple, Cell
-from helper_funcs import WEEKS, DAYS_5, a, get_dist, try_apply_change
+from optimal_utils import WEEKS, DAYS_5, a, get_dist, try_apply_change
 
 def build_priority_groups(
     stops: Dict[int, Stop],

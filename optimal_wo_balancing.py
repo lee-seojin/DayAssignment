@@ -7,7 +7,7 @@ import gurobipy as gp
 from gurobipy import GRB
 
 from data_type import SchedTuple, Stop, DAYS_5
-from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M, build_k_neighborhood
+from optimal_utils import a, get_dist, OD_CM_TO_M, EARTH_R_M, build_k_neighborhood
 
 def solve_formulation_wo_balancing(
     stops: Dict[int, Stop],

@@ -1,8 +1,8 @@
 from __future__ import annotations
 from typing import Dict, Tuple, List
 from data_type import Stop, SchedTuple
-from helper_funcs import WEEKS, DAYS_5, a, get_dist
-from optimal_solver import build_k_neighborhood
+from optimal_utils import WEEKS, DAYS_5, a, get_dist
+from solver import build_k_neighborhood
 
 Cell = Tuple[int, str]  # (l, d)
 

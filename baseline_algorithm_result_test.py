@@ -5,9 +5,9 @@ import itertools
 
 import pandas as pd
 
-from helper_funcs import load_artifacts, a, get_dist, WEEKS, DAYS_5
+from optimal_utils import load_artifacts, get_dist, DAYS_5, _get_visited_by_cell
 from data_type import WeekTuple, DayBits, SchedTuple, TuplePools
-from shapely.geometry import MultiPoint
+from shapely.geometry import MultiPoint, Point
 
 # CSV parsing
 def parse_week_value(x) -> WeekTuple:
@@ -22,13 +22,11 @@ def parse_week_value(x) -> WeekTuple:
     parts = [p.strip() for p in s.split(",") if p.strip()]
     return tuple(int(p) for p in parts)
 
-
 def parse_daybits_tuple_str(x) -> DayBits:
     t = ast.literal_eval(str(x))
     if len(t) != 7:
         raise ValueError(f"daybits must be length 7, got {t}")
     return tuple(int(v) for v in t)
-
 
 def _dowcd_to_weektuple(x, pools: TuplePools, timecycle: int) -> WeekTuple:
     s = str(x).strip().upper()
@@ -48,7 +46,6 @@ def _dowcd_to_weektuple(x, pools: TuplePools, timecycle: int) -> WeekTuple:
     if "," in s:
         return pools.week([int(v.strip()) for v in s.split(",") if v.strip()])
     return tuple()
-
 
 def build_p_from_result_csv(csv_path: Path, artifacts: dict) -> Dict[int, SchedTuple]:
     df = pd.read_csv(csv_path)
@@ -94,29 +91,9 @@ def build_p_from_result_csv(csv_path: Path, artifacts: dict) -> Dict[int, SchedT
             )
         return p
 
-    else:
-        raise KeyError(f"Unknown result CSV format. columns={list(df.columns)}")
-
-
-# Common preprocessing
-def _get_visited(artifacts: dict, p: Dict[int, SchedTuple]) -> dict:
-    ids = list(p.keys())
-    timecycle = int(artifacts["timecycle"])
-    weeks_local = list(range(1, timecycle + 1))
-
-    visited = {(l, d): [] for l in weeks_local for d in DAYS_5}
-    for i in ids:
-        for l in weeks_local:
-            for d in DAYS_5:
-                if a(p[i], l, d) == 1:
-                    visited[(l, d)].append(i)
-    return visited
-
-
-# Existing objective functions
 def compute_nn_objective(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
     stops, Ddist = artifacts["stops"], artifacts["Ddist"]
-    visited = _get_visited(artifacts, p)
+    visited = _get_visited_by_cell(artifacts, p)
 
     total = 0.0
     for ids_cell in visited.values():
@@ -126,10 +103,9 @@ def compute_nn_objective(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
             total += min(get_dist(i, j, Ddist, stops) for j in ids_cell if j != i)
     return total
 
-
 def compute_mssc_objective(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
     stops, Ddist = artifacts["stops"], artifacts["Ddist"]
-    visited = _get_visited(artifacts, p)
+    visited = _get_visited_by_cell(artifacts, p)
 
     total = 0.0
     for ids_cell in visited.values():
@@ -141,11 +117,10 @@ def compute_mssc_objective(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
         )
     return total
 
-
 # Rectangle model metrics
 def compute_rectangle_size_term(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
     stops = artifacts["stops"]
-    visited = _get_visited(artifacts, p)
+    visited = _get_visited_by_cell(artifacts, p)
 
     total = 0.0
     for ids_cell in visited.values():
@@ -164,9 +139,9 @@ def compute_rectangle_size_term(artifacts: dict, p: Dict[int, SchedTuple]) -> fl
 
     return total
 
-def compute_rectangle_overlap_term(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
+def compute_rectangle_overlap_sides_term(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
     stops = artifacts["stops"]
-    visited = _get_visited(artifacts, p)
+    visited = _get_visited_by_cell(artifacts, p)
 
     total = 0.0
     day_pairs = list(itertools.combinations(DAYS_5, 2))   # d < e only
@@ -202,22 +177,62 @@ def compute_rectangle_overlap_term(artifacts: dict, p: Dict[int, SchedTuple]) ->
 
     return total
 
-
-def compute_rectangle_objective(
-    artifacts: dict,
-    p: Dict[int, SchedTuple],
-    w1: float = 1.0,
-    w2: float = 1.0,
-) -> Tuple[float, float, float]:
+def compute_rectangle_objective(artifacts: dict, p: Dict[int, SchedTuple], w1: float = 1.0, w2: float = 1.0,) -> Tuple[float, float, float]:
     rect_term = compute_rectangle_size_term(artifacts, p)
-    overlap_term = compute_rectangle_overlap_term(artifacts, p)
+    overlap_term = compute_rectangle_overlap_sides_term(artifacts, p)
     obj = w1 * rect_term + w2 * overlap_term
 
     return obj, rect_term, overlap_term
 
+def compute_rectangle_overlap_nodes_term(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
+
+    stops = artifacts["stops"]
+    visited = _get_visited_by_cell(artifacts, p)
+
+    timecycle = int(artifacts["timecycle"])
+    weeks_local = list(range(1, timecycle + 1))
+
+    total = 0.0
+
+    for l in weeks_local:
+        visited_set = {d: set(visited[(l, d)]) for d in DAYS_5}
+        rect = {}
+
+        for e in DAYS_5:
+            ids_cell = visited[(l, e)]
+
+            if not ids_cell:
+                rect[e] = None
+                continue
+
+            xs = [float(stops[i].xcoord) for i in ids_cell]
+            ys = [float(stops[i].ycoord) for i in ids_cell]
+            rect[e] = (min(xs), max(xs), min(ys), max(ys))
+
+        week_ids = set().union(*(visited_set[d] for d in DAYS_5))
+
+        for i in week_ids:
+            xi = float(stops[i].xcoord)
+            yi = float(stops[i].ycoord)
+
+            for e in DAYS_5:
+                if i in visited_set[e]:
+                    continue
+
+                if rect[e] is None:
+                    continue
+
+                x1_e, x2_e, y1_e, y2_e = rect[e]
+
+                if x1_e <= xi <= x2_e and y1_e <= yi <= y2_e:
+                    total += 1.0
+
+    return total
+
+# NHO/Convex Hull metrics
 def compute_nho_metric(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
     stops = artifacts["stops"]
-    visited = _get_visited(artifacts, p)
+    visited = _get_visited_by_cell(artifacts, p)
     timecycle = int(artifacts["timecycle"])
     weeks_local = list(range(1, timecycle + 1))
     day_pairs = list(itertools.combinations(DAYS_5, 2))   # d < e only
@@ -230,15 +245,13 @@ def compute_nho_metric(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
 
         for d in DAYS_5:
             ids_cell = visited[(l, d)]
-            if len(ids_cell) < 3:
-                # 점이 2개 이하이면 polygon area가 0: NHO 계산 대상에서 제외
+            if len(ids_cell) < 3: # 점이 2개 이하이면 polygon area가 0, NHO 계산 대상에서 제외
                 hulls[d] = None
                 continue
 
             pts = [(float(stops[i].xcoord), float(stops[i].ycoord)) for i in ids_cell]
             hull = MultiPoint(pts).convex_hull
 
-            # convex_hull이 Polygon이 아니거나 면적이 0이면 제외
             if hull.geom_type != "Polygon" or hull.area <= 0:
                 hulls[d] = None
                 continue
@@ -274,11 +287,183 @@ def compute_nho_metric(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
 
     return sum(week_nho_values) / len(week_nho_values)
 
+def compute_pairwise_nho(artifacts: dict, p: Dict[int, SchedTuple], label: str) -> pd.DataFrame:
+    """
+    For each week and day pair (d,e), compute:
+        - convex hull area of day d/e
+        - intersection area between hull d and hull e
+        - directed NHO terms:
+            Area(C_d ∩ C_e) / Area(C_d)
+            Area(C_d ∩ C_e) / Area(C_e)
+        - number of nodes inside the intersection polygon
+            * nodes from day d
+            * nodes from day e
+            * nodes from all days in the same week
+    """
+    stops = artifacts["stops"]
+    visited = _get_visited_by_cell(artifacts, p)
+
+    timecycle = int(artifacts["timecycle"])
+    weeks_local = list(range(1, timecycle + 1))
+    day_pairs = list(itertools.combinations(DAYS_5, 2))
+
+    rows = []
+
+    for l in weeks_local:
+        hulls = {}
+        hull_areas = {}
+        hull_geom_types = {}
+        day_counts = {}
+
+        # Build convex hull for each day
+        for d in DAYS_5:
+            ids_cell = visited[(l, d)]
+            day_counts[d] = len(ids_cell)
+
+            if len(ids_cell) < 3:
+                hulls[d] = None
+                hull_areas[d] = 0.0
+                hull_geom_types[d] = "None_less_than_3_points"
+                continue
+
+            pts = [
+                (float(stops[i].xcoord), float(stops[i].ycoord))
+                for i in ids_cell
+            ]
+
+            hull = MultiPoint(pts).convex_hull
+            hull_geom_types[d] = hull.geom_type
+
+            if hull.geom_type != "Polygon" or hull.area <= 0:
+                hulls[d] = None
+                hull_areas[d] = 0.0
+                continue
+
+            hulls[d] = hull
+            hull_areas[d] = float(hull.area)
+
+        # All nodes visited in this week, regardless of day
+        week_ids = []
+        for d in DAYS_5:
+            week_ids.extend(visited[(l, d)])
+        week_ids = list(set(week_ids))
+
+        # Pairwise hull overlap diagnostics
+        for d, e in day_pairs:
+            hd = hulls.get(d)
+            he = hulls.get(e)
+
+            area_d = hull_areas.get(d, 0.0)
+            area_e = hull_areas.get(e, 0.0)
+
+            inter_area = 0.0
+            n_d_in_inter = 0
+            n_e_in_inter = 0
+            n_all_in_inter = 0
+            nho_d_to_e = 0.0
+            nho_e_to_d = 0.0
+
+            if hd is not None and he is not None:
+                inter = hd.intersection(he)
+
+                if not inter.is_empty and inter.area > 0:
+                    inter_area = float(inter.area)
+
+                    if area_d > 0:
+                        nho_d_to_e = inter_area / area_d
+
+                    if area_e > 0:
+                        nho_e_to_d = inter_area / area_e
+
+                    # Count day-d nodes inside intersection area
+                    for i in visited[(l, d)]:
+                        pt = Point(float(stops[i].xcoord), float(stops[i].ycoord))
+                        if inter.covers(pt):
+                            n_d_in_inter += 1
+
+                    # Count day-e nodes inside intersection area
+                    for i in visited[(l, e)]:
+                        pt = Point(float(stops[i].xcoord), float(stops[i].ycoord))
+                        if inter.covers(pt):
+                            n_e_in_inter += 1
+
+                    # Count all nodes in this week inside intersection area
+                    for i in week_ids:
+                        pt = Point(float(stops[i].xcoord), float(stops[i].ycoord))
+                        if inter.covers(pt):
+                            n_all_in_inter += 1
+
+            rows.append({
+                "METHOD": label,
+                "WEEK": l,
+                "DAY_D": d,
+                "DAY_E": e,
+
+                "N_D": day_counts[d],
+                "N_E": day_counts[e],
+
+                "HULL_D_TYPE": hull_geom_types[d],
+                "HULL_E_TYPE": hull_geom_types[e],
+
+                "HULL_AREA_D": area_d,
+                "HULL_AREA_E": area_e,
+                "HULL_INTERSECTION_AREA": inter_area,
+
+                "NHO_D_TO_E": nho_d_to_e,
+                "NHO_E_TO_D": nho_e_to_d,
+                "NHO_DIRECTED_SUM": nho_d_to_e + nho_e_to_d,
+
+                "N_D_IN_INTERSECTION": n_d_in_inter,
+                "N_E_IN_INTERSECTION": n_e_in_inter,
+                "N_D_PLUS_E_IN_INTERSECTION": n_d_in_inter + n_e_in_inter,
+                "N_ALL_IN_INTERSECTION": n_all_in_inter,
+            })
+
+    return pd.DataFrame(rows)
+
+def compute_hull_overlap_nodes_term(artifacts: dict, p: Dict[int, SchedTuple]) -> float:
+
+    stops = artifacts["stops"]
+    visited = _get_visited_by_cell(artifacts, p)
+
+    timecycle = int(artifacts["timecycle"])
+    weeks_local = list(range(1, timecycle + 1))
+
+    total = 0.0
+
+    for l in weeks_local:
+        visited_set = {d: set(visited[(l, d)]) for d in DAYS_5}
+        hulls = {}
+
+        for e in DAYS_5:
+            ids_cell = visited[(l, e)]
+
+            if len(ids_cell) < 3:
+                hulls[e] = None
+                continue
+
+            pts = [(float(stops[i].xcoord), float(stops[i].ycoord)) for i in ids_cell]
+            hull = MultiPoint(pts).convex_hull
+            hulls[e] = hull if hull.geom_type == "Polygon" and hull.area > 0 else None
+
+        week_ids = set().union(*(visited_set[d] for d in DAYS_5))
+
+        for i in week_ids:
+            pt = Point(float(stops[i].xcoord), float(stops[i].ycoord))
+
+            for e in DAYS_5:
+                if i in visited_set[e]:
+                    continue
+
+                if hulls[e] is not None and hulls[e].covers(pt):
+                    total += 1.0
+
+    return total
 
 # Main
 def main():
     ARTIFACTS_PATH = Path("baseline_data_store/1004812_artifacts.pkl")
-    RESULT_CSV = Path("./results_optimal/1004812_20260428_140532_resultdetail.csv")
+    RESULT_CSV = Path("./results_optimal/1004812_20260523_220458_resultdetail.csv")
 
     W1 = 1.0
     W2 = 1.0
@@ -287,50 +472,90 @@ def main():
     baseline_sched: Dict[int, SchedTuple] = artifacts["baseline_sched"]
     p_optimal = build_p_from_result_csv(RESULT_CSV, artifacts)
 
-    for label, p in [("Baseline", baseline_sched), ("Optimal ", p_optimal)]:
-        nn = compute_nn_objective(artifacts, p)
-        print(f"[{label}]  NN              = {nn:>15,.2f}")
-
-        mssc = compute_mssc_objective(artifacts, p)
-        print(f"[{label}]  MSSC            = {mssc:>15,.2f}")
-
-        nho = compute_nho_metric(artifacts, p)
-        print(f"[{label}]  NHO             = {nho:>15,.6f}")
-
-        rect_obj, rect_term, overlap_term = compute_rectangle_objective(
-            artifacts, p, w1=W1, w2=W2
-        )
-        print(f"[{label}]  RECT_SIZE term  = {rect_term:>15,.6f}")
-        print(f"[{label}]  OVERLAP term    = {overlap_term:>15,.6f}")
-        print(f"[{label}]  RECT_OBJ        = {rect_obj:>15,.6f}")
-        print()
-
-    # improvements
+    # Compute each metric only once
     nn_b = compute_nn_objective(artifacts, baseline_sched)
     nn_o = compute_nn_objective(artifacts, p_optimal)
-    if nn_b != 0:
-        print(f"[NN improvement]          {(nn_b - nn_o) / nn_b * 100:.2f}%")
 
     mssc_b = compute_mssc_objective(artifacts, baseline_sched)
     mssc_o = compute_mssc_objective(artifacts, p_optimal)
-    if mssc_b != 0:
-        print(f"[MSSC improvement]        {(mssc_b - mssc_o) / mssc_b * 100:.2f}%")
 
     nho_b = compute_nho_metric(artifacts, baseline_sched)
     nho_o = compute_nho_metric(artifacts, p_optimal)
-    if nho_b != 0:
-        print(f"[NHO improvement]         {(nho_b - nho_o) / nho_b * 100:.2f}%")
 
-    rect_b, rect_size_b, overlap_b = compute_rectangle_objective(artifacts, baseline_sched, w1=W1, w2=W2)
-    rect_o, rect_size_o, overlap_o = compute_rectangle_objective(artifacts, p_optimal, w1=W1, w2=W2)
+    rect_b, rect_size_b, overlap_b = compute_rectangle_objective(
+        artifacts, baseline_sched, w1=W1, w2=W2
+    )
+    rect_o, rect_size_o, overlap_o = compute_rectangle_objective(
+        artifacts, p_optimal, w1=W1, w2=W2
+    )
 
-    if rect_size_b != 0:
-        print(f"[RECT_SIZE improvement]   {(rect_size_b - rect_size_o) / rect_size_b * 100:.2f}%")
-    if overlap_b != 0:
-        print(f"[OVERLAP improvement]     {(overlap_b - overlap_o) / overlap_b * 100:.2f}%")
-    if rect_b != 0:
-        print(f"[RECT_OBJ improvement]    {(rect_b - rect_o) / rect_b * 100:.2f}%")
+    rect_overlap_nodes_b = compute_rectangle_overlap_nodes_term(artifacts, baseline_sched)
+    rect_overlap_nodes_o = compute_rectangle_overlap_nodes_term(artifacts, p_optimal)
 
+    hull_overlap_nodes_b = compute_hull_overlap_nodes_term(artifacts, baseline_sched)
+    hull_overlap_nodes_o = compute_hull_overlap_nodes_term(artifacts, p_optimal)
+
+    # metric-wise comparison
+    print("\n[Baseline vs Algorithm Metrics]\n")
+
+    def print_row(metric_name, baseline_value, algorithm_value, fmt):
+        if baseline_value != 0:
+            improvement = (baseline_value - algorithm_value) / baseline_value * 100
+            improvement_str = f"{improvement:.2f}%"
+        else:
+            improvement_str = "N/A"
+
+        print(
+            f"{metric_name:<32} "
+            f"Baseline = {format(baseline_value, fmt):>15}   "
+            f"Algorithm = {format(algorithm_value, fmt):>15}   "
+            f"Improvement = {improvement_str:>10}"
+        )
+
+    print_row("NN", nn_b, nn_o, ",.2f")
+    print_row("MSSC", mssc_b, mssc_o, ",.2f")
+    print_row("NHO", nho_b, nho_o, ",.6f")
+    print_row("RECT_SIZE", rect_size_b, rect_size_o, ",.6f")
+    print_row("OVERLAP", overlap_b, overlap_o, ",.6f")
+    print_row("RECT_OBJ", rect_b, rect_o, ",.6f")
+    print_row("#RECT_NODE_OVERLAP", rect_overlap_nodes_b, rect_overlap_nodes_o, ",.0f")
+    print_row("#HULL_NODE_OVERLAP", hull_overlap_nodes_b, hull_overlap_nodes_o, ",.0f")
+
+    pairwise_b = compute_pairwise_nho(
+        artifacts,
+        baseline_sched,
+        label="Baseline",
+    )
+
+    pairwise_o = compute_pairwise_nho(
+        artifacts,
+        p_optimal,
+        label="Algorithm",
+    )
+
+    pairwise_df = pd.concat(
+        [pairwise_b, pairwise_o],
+        ignore_index=True,
+    )
+
+    pairwise_df["METHOD_ORDER"] = pairwise_df["METHOD"].map({
+        "Baseline": 0,
+        "Algorithm": 1,
+    })
+
+    pairwise_df = pairwise_df.sort_values(
+        ["WEEK", "DAY_D", "DAY_E", "METHOD_ORDER"]
+    ).drop(columns=["METHOD_ORDER"])
+
+    pairwise_df = pairwise_df.reset_index(drop=True)
+
+    out_dir = Path("convex_hull_diagnostics")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    diag_path = out_dir / f"{ARTIFACTS_PATH.stem}_pairwise_nho.csv"
+    pairwise_df.to_csv(diag_path, index=False, encoding="utf-8-sig")
+
+    print(f"\nSaved pairwise NHO diagnostics: {diag_path}")
 
 if __name__ == "__main__":
     main()

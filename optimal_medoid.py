@@ -7,7 +7,7 @@ import gurobipy as gp
 from gurobipy import GRB
 
 from data_type import SchedTuple, Stop, DAYS_5
-from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M
+from optimal_utils import a, get_dist, OD_CM_TO_M, EARTH_R_M
 
 
 def solve_formulation_medoid(
@@ -29,7 +29,7 @@ def solve_formulation_medoid(
     WEEKS_local = list(range(1, timecycle + 1))
     ids = list(stops.keys())
 
-    # Big-M: identical pattern to solve_formulation() in optimal_solver.py
+    # Big-M: identical pattern to solve_formulation() in solver.py
     max_od_m = max(Ddist.values()) * OD_CM_TO_M if Ddist else 0.0
     lons = [float(stops[i].xcoord) for i in ids]
     lats = [float(stops[i].ycoord) for i in ids]

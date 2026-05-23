@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Iterable, Literal, Tuple
+from typing import Dict, List, Iterable, Tuple
 from data_type import SchedTuple, WeekTuple, DayBits, ALL_DAYS_7, KEY_COLS, TuplePools, DAY_MAP_MIN, ScheduleView, Stop
-from heuristic_solver import DATA_SET
+from outdated.heuristic_solver import DATA_SET
 import itertools
 import pickle
-import math
 
 import pandas as pd
 

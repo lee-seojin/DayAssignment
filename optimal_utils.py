@@ -132,7 +132,6 @@ def build_k_neighborhood(
 
     return neigh
 
-
 def load_artifacts(pkl_path: Path) -> dict:
     with pkl_path.open("rb") as f:
         return pickle.load(f)
@@ -158,3 +157,16 @@ def build_pi_from_artifacts(
         pi[i] = sched_opts
 
     return pi
+
+def _get_visited_by_cell(artifacts: dict, p: Dict[int, SchedTuple]) -> dict:
+    ids = list(p.keys())
+    timecycle = int(artifacts["timecycle"])
+    weeks_local = list(range(1, timecycle + 1))
+
+    visited = {(l, d): [] for l in weeks_local for d in DAYS_5}
+    for i in ids:
+        for l in weeks_local:
+            for d in DAYS_5:
+                if a(p[i], l, d) == 1:
+                    visited[(l, d)].append(i)
+    return visited

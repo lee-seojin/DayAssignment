@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from data_type import Stop, SchedTuple, Cell
-from helper_funcs import WEEKS, DAYS_5, a, get_dist, try_apply_change
+from optimal_utils import WEEKS, DAYS_5, a, get_dist, try_apply_change
 
 
 # Volume utilities

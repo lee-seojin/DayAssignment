@@ -9,14 +9,30 @@ import math
 from typing import Dict, Tuple
 
 from data_type import SchedTuple, ScheduleView, Stop, DAYS_5, ALL_DAYS_7
-from helper_funcs import a, get_dist, OD_CM_TO_M, EARTH_R_M, make_run_prefix, build_k_neighborhood, load_artifacts, build_pi_from_artifacts
-from optimal_medoid import solve_formulation_medoid
-from optimal_wo_balancing import solve_formulation_wo_balancing
-from optimal_rectangle import solve_formulation_rectangle
+from optimal_utils import a, get_dist, OD_CM_TO_M, EARTH_R_M, make_run_prefix, build_k_neighborhood, load_artifacts, build_pi_from_artifacts
+from optimal_overlap_nodes import solve_formulation_overlap_nodes
+from heuristic_alns import alns_improve
 
-DATA_SET = "1004812" # "1042199" # "1027633"
+#DATA_SET = "1027633"
+#DATA_SET = "1042199"
+DATA_SET = "1004812"
+
 W1, W2 = 1.0, 1.0
 RUN_TIME = 60*100
+
+def filter_by_frequency_1(
+    stops: Dict[int, Stop],
+    baseline_sched: Dict[int, SchedTuple],
+):
+    selected_ids = {
+        i for i, s in stops.items()
+        if int(s.frequency) == 1
+    }
+
+    stops_f = {i: s for i, s in stops.items() if i in selected_ids}
+    baseline_f = {i: p for i, p in baseline_sched.items() if i in selected_ids}
+
+    return stops_f, baseline_f
 
 def filter_by_dowcd_A(
     stops: Dict[int, Stop],
@@ -207,10 +223,11 @@ def main():
     sched_cache: Dict[Tuple[str, int], List[SchedTuple]] = artifacts["sched_cache"]
     Ddist: Dict[Tuple[int, int], float] = artifacts["Ddist"]
 
-    stops, baseline_sched = filter_by_dowcd_A(stops, baseline_sched)
+    #stops, baseline_sched = filter_by_dowcd_A(stops, baseline_sched)
+    #stops, baseline_sched = filter_by_frequency_1(stops, baseline_sched)
     Pi = build_pi_from_artifacts(stops, sched_cache, baseline_sched)
 
-    model, chosen_tuple, changed = solve_formulation_rectangle(
+    model, chosen_tuple, changed = solve_formulation_overlap_nodes(
         stops=stops,
         pi=Pi,
         baseline_sched=baseline_sched,
@@ -224,6 +241,22 @@ def main():
         time_limit=RUN_TIME,
         mip_gap=0.0,
     )
+
+
+    """chosen_tuple, changed, alns_obj = alns_improve(
+        stops=stops,
+        pi=Pi,
+        baseline_sched=baseline_sched,
+        p_initial=chosen_tuple,
+        timecycle=timecycle,
+        v_max=V_MAX,
+        g_max=G_MAX,
+        c_max=C_MAX,
+        max_iters=300,
+        patience=50,
+        remove_ratio=0.5,
+        seed=42,
+    )"""
 
     for s in stops.values():
         w_t, d_b = chosen_tuple[s.custno]

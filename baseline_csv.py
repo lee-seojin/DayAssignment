@@ -1,7 +1,7 @@
 from pathlib import Path
 import pandas as pd
 
-from helper_funcs import load_artifacts
+from optimal_utils import load_artifacts
 from data_type import ALL_DAYS_7
 
 DATA_SET = "1027633"

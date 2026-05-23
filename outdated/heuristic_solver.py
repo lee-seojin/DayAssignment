@@ -7,7 +7,7 @@ import csv
 from datetime import datetime
 import pickle
 
-from helper_funcs import compute_V, make_run_prefix
+from optimal_utils import compute_V, make_run_prefix
 from heuristic_phase1 import phase_1
 from heuristic_phase2 import phase_2
 from data_type import Stop, SchedTuple
@@ -131,7 +131,7 @@ def main():
     print(f"[Total Execution Time] ={elapsed:.3f}s")
 
     run_prefix = make_run_prefix(DATA_SET)
-    out_path = Path("results_heuristic") / f"{run_prefix}_heuristic_resultdetail.csv"
+    out_path = Path("../results_heuristic") / f"{run_prefix}_heuristic_resultdetail.csv"
 
     meta = {
         "date": datetime.now().strftime("%y/%m/%d"),
