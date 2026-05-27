@@ -3,11 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Iterable, Tuple
 from data_type import SchedTuple, WeekTuple, DayBits, ALL_DAYS_7, KEY_COLS, TuplePools, DAY_MAP_MIN, ScheduleView, Stop
-from outdated.heuristic_solver import DATA_SET
 import itertools
 import pickle
 
 import pandas as pd
+
+DATA_SET = "1004940"
 
 # loading params.txt
 def load_params(params_path: Path) -> dict:

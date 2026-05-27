@@ -463,7 +463,7 @@ def compute_hull_overlap_nodes_term(artifacts: dict, p: Dict[int, SchedTuple]) -
 # Main
 def main():
     ARTIFACTS_PATH = Path("baseline_data_store/1004812_artifacts.pkl")
-    RESULT_CSV = Path("./results_optimal/1004812_20260523_220458_resultdetail.csv")
+    RESULT_CSV = Path("./results_optimal/1004812_20260526_105914_resultdetail.csv")
 
     W1 = 1.0
     W2 = 1.0
@@ -552,7 +552,7 @@ def main():
     out_dir = Path("convex_hull_diagnostics")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    diag_path = out_dir / f"{ARTIFACTS_PATH.stem}_pairwise_nho.csv"
+    diag_path = out_dir / f"{ARTIFACTS_PATH.stem}_pairwise_nho_again.csv"
     pairwise_df.to_csv(diag_path, index=False, encoding="utf-8-sig")
 
     print(f"\nSaved pairwise NHO diagnostics: {diag_path}")

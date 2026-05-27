@@ -56,6 +56,12 @@ def solve_formulation_overlap_nodes(
         for i in ids for l in WEEKS_local for d in DAYS_5
     }
 
+    # active_il: stop i is visited at least once in week l
+    active = {
+        (i, l): model.addVar(vtype=GRB.BINARY, name=f"active_{i}_{l}")
+        for i in ids for l in WEEKS_local
+    }
+
     # c_i: stop i changed from baseline schedule
     c = {i: model.addVar(vtype=GRB.BINARY, name=f"c_{i}") for i in ids}
 
@@ -101,7 +107,8 @@ def solve_formulation_overlap_nodes(
         for i in ids for l in WEEKS_local for e in DAYS_5
     }
 
-    # qn_ile: stop i is inside rectangle of day e but does not visit day e
+    # qn_ile: stop i is active in week l and is inside rectangle
+    # of a day e that it does not visit
     qn = {
         (i, l, e): model.addVar(vtype=GRB.BINARY, name=f"qn_{i}_{l}_{e}")
         for i in ids for l in WEEKS_local for e in DAYS_5
@@ -111,12 +118,13 @@ def solve_formulation_overlap_nodes(
 
     # Objective
     rect_size = gp.quicksum(
-        (x2[(l, d)] - x1[(l, d)]) + (y2[(l, d)] - y1[(l, d)]) for l in WEEKS_local for d in DAYS_5
+        (x2[(l, d)] - x1[(l, d)]) + (y2[(l, d)] - y1[(l, d)])
+        for l in WEEKS_local for d in DAYS_5
     )
 
-    # Count +1 when stop i lies inside rectangle of a day e it does not visit.
     node_overlap = gp.quicksum(
-        qn[(i, l, e)] for i in ids for l in WEEKS_local for e in DAYS_5
+        qn[(i, l, e)]
+        for i in ids for l in WEEKS_local for e in DAYS_5
     )
 
     model.setObjective(w1 * rect_size + w2 * node_overlap, GRB.MINIMIZE)
@@ -125,7 +133,8 @@ def solve_formulation_overlap_nodes(
     # (1) Pattern assign
     for i in ids:
         model.addConstr(
-            gp.quicksum(s[(i, p)] for p in pi[i]) == 1, name=f"pattern_assign_{i}",
+            gp.quicksum(s[(i, p)] for p in pi[i]) == 1,
+            name=f"pattern_assign_{i}",
         )
 
     # (2) Day assign
@@ -133,24 +142,38 @@ def solve_formulation_overlap_nodes(
         for l in WEEKS_local:
             for d in DAYS_5:
                 model.addConstr(
-                    z[(i, l, d)] == gp.quicksum(a(p, l, d) * s[(i, p)] for p in pi[i]), name=f"day_assign_{i}_{l}_{d}",
+                    z[(i, l, d)] == gp.quicksum(a(p, l, d) * s[(i, p)] for p in pi[i]),
+                    name=f"day_assign_{i}_{l}_{d}",
                 )
 
-    # (3) Volume constraint
+    # (3) Active-week indicator
+    for i in ids:
+        for l in WEEKS_local:
+            for d in DAYS_5:
+                model.addConstr(active[(i, l)] >= z[(i, l, d)], name=f"active_ge_z_{i}_{l}_{d}")
+
+            model.addConstr(
+                active[(i, l)] <= gp.quicksum(z[(i, l, d)] for d in DAYS_5),
+                name=f"active_le_sumz_{i}_{l}",
+            )
+
+    # (4) Volume constraint
     for l in WEEKS_local:
         for d in DAYS_5:
             model.addConstr(
-                gp.quicksum(float(stops[i].volume) * z[(i, l, d)] for i in ids) <= v_max, name=f"capV_{l}_{d}",
+                gp.quicksum(float(stops[i].volume) * z[(i, l, d)] for i in ids) <= v_max,
+                name=f"capV_{l}_{d}",
             )
 
-    # (4) Weight constraint
+    # (5) Weight constraint
     for l in WEEKS_local:
         for d in DAYS_5:
             model.addConstr(
-                gp.quicksum(float(stops[i].weight) * z[(i, l, d)] for i in ids) <= g_max, name=f"capG_{l}_{d}",
+                gp.quicksum(float(stops[i].weight) * z[(i, l, d)] for i in ids) <= g_max,
+                name=f"capG_{l}_{d}",
             )
 
-    # (5) Pattern change
+    # (6) Pattern change
     for i in ids:
         p0 = baseline_sched[i]
 
@@ -159,7 +182,7 @@ def solve_formulation_overlap_nodes(
 
         model.addConstr(c[i] + s[(i, p0)] == 1, name=f"change_{i}")
 
-    # (6) Pattern alternation constraint
+    # (7) Pattern alternation constraint
     model.addConstr(gp.quicksum(c[i] for i in ids) <= c_max, name="change_budget")
 
     # Rectangle Bounds
@@ -174,16 +197,20 @@ def solve_formulation_overlap_nodes(
 
                 # If z_ild = 1, rectangle (l,d) must contain stop i.
                 model.addConstr(
-                    x1[(l, d)] <= xi + MX * (1 - z[(i, l, d)]), name=f"xmin_{i}_{l}_{d}",
+                    x1[(l, d)] <= xi + MX * (1 - z[(i, l, d)]),
+                    name=f"xmin_{i}_{l}_{d}",
                 )
                 model.addConstr(
-                    x2[(l, d)] >= xi - MX * (1 - z[(i, l, d)]), name=f"xmax_{i}_{l}_{d}",
+                    x2[(l, d)] >= xi - MX * (1 - z[(i, l, d)]),
+                    name=f"xmax_{i}_{l}_{d}",
                 )
                 model.addConstr(
-                    y1[(l, d)] <= yi + MY * (1 - z[(i, l, d)]), name=f"ymin_{i}_{l}_{d}",
+                    y1[(l, d)] <= yi + MY * (1 - z[(i, l, d)]),
+                    name=f"ymin_{i}_{l}_{d}",
                 )
                 model.addConstr(
-                    y2[(l, d)] >= yi - MY * (1 - z[(i, l, d)]), name=f"ymax_{i}_{l}_{d}",
+                    y2[(l, d)] >= yi - MY * (1 - z[(i, l, d)]),
+                    name=f"ymax_{i}_{l}_{d}",
                 )
 
     eps = 1e-5
@@ -225,10 +252,14 @@ def solve_formulation_overlap_nodes(
                 model.addConstr(Qin <= U, name=f"q_le_U_{i}_{l}_{e}")
                 model.addConstr(Qin >= L + R + B + U - 3, name=f"q_ge_all_{i}_{l}_{e}")
 
-                # qn = q AND (1 - z_e)
+                # qn = active AND q AND (1 - z_e)
+                model.addConstr(Qnonvisit <= active[(i, l)], name=f"qn_le_active_{i}_{l}_{e}")
                 model.addConstr(Qnonvisit <= Qin, name=f"qn_le_q_{i}_{l}_{e}")
                 model.addConstr(Qnonvisit <= 1 - z[(i, l, e)], name=f"qn_le_nonvisit_{i}_{l}_{e}")
-                model.addConstr(Qnonvisit >= Qin - z[(i, l, e)], name=f"qn_ge_q_minus_visit_{i}_{l}_{e}")
+                model.addConstr(
+                    Qnonvisit >= active[(i, l)] + Qin - z[(i, l, e)] - 1,
+                    name=f"qn_ge_all_{i}_{l}_{e}",
+                )
 
     # Solve
     model.optimize()

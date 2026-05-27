@@ -48,6 +48,6 @@ def make_qgis_label(input_csv, output_csv=None):
 
 if __name__ == "__main__":
 
-    input_csv = Path("results_optimal/1042199_20260505_141711_resultdetail.csv")
+    input_csv = Path("results_optimal/1004812_20260526_105914_resultdetail.csv")
     output_path = make_qgis_label(input_csv)
     print(f"Saved: {output_path}")
