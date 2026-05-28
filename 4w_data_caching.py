@@ -10,6 +10,10 @@ import pandas as pd
 
 DATA_SET = "1004940"
 
+# Cache options by dataset
+SKIP_PRIORITY_MAP_DATASETS = {"1004940"}
+SKIP_DDIST_DATASETS = {"1004940"}
+
 # loading params.txt
 def load_params(params_path: Path) -> dict:
     p = pd.read_csv(params_path, sep="\t").iloc[0]
@@ -243,9 +247,19 @@ def build_inputs_and_cache(
     dowcd_set = set([s.dowcd for s in stops.values()])
     freq_set = set([s.frequency for s in stops.values()])
     sched_cache = build_feasible_sched(pools, darules_map, dowcd_set, freq_set)
-    priority_map = build_priority_map(pools, darules_map, aggr["dowcd"], aggr["frequency"])
 
-    Ddist = load_od_matrix_flexible(od_source)
+
+    if DATA_SET in SKIP_PRIORITY_MAP_DATASETS:
+        priority_map = {}
+        print(f"[SKIP] priority_map: skipped for dataset {DATA_SET}")
+    else:
+        priority_map = build_priority_map(pools, darules_map, dowcd_set, freq_set)
+
+    if DATA_SET in SKIP_DDIST_DATASETS:
+        Ddist = {}
+        print(f"[SKIP] Ddist: skipped for dataset {DATA_SET}")
+    else:
+        Ddist = load_od_matrix_flexible(od_source)
 
     n = len(stops)
     C_max = int(round(params["MAX_PCT_DAY_CHANGES"] / 100.0 * n))

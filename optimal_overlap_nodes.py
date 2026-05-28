@@ -18,8 +18,8 @@ def solve_formulation_overlap_nodes(
     g_max: float,
     c_max: int,
     Ddist: Dict[Tuple[int, int], float],
-    w1: float = 0.0,
-    w2: float = 1.0,
+    w1: float,
+    w2: float,
     time_limit: Optional[int] = 600,
     mip_gap: Optional[float] = 0.0,
 ):

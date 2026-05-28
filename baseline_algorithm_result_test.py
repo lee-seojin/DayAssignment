@@ -462,8 +462,8 @@ def compute_hull_overlap_nodes_term(artifacts: dict, p: Dict[int, SchedTuple]) -
 
 # Main
 def main():
-    ARTIFACTS_PATH = Path("baseline_data_store/1004812_artifacts.pkl")
-    RESULT_CSV = Path("./results_optimal/1004812_20260526_105914_resultdetail.csv")
+    ARTIFACTS_PATH = Path("baseline_data_store/1004940_artifacts.pkl")
+    RESULT_CSV = Path("./results_optimal/1004940_20260527_184639_resultdetail.csv")
 
     W1 = 1.0
     W2 = 1.0
@@ -473,11 +473,11 @@ def main():
     p_optimal = build_p_from_result_csv(RESULT_CSV, artifacts)
 
     # Compute each metric only once
-    nn_b = compute_nn_objective(artifacts, baseline_sched)
+    """nn_b = compute_nn_objective(artifacts, baseline_sched)
     nn_o = compute_nn_objective(artifacts, p_optimal)
 
     mssc_b = compute_mssc_objective(artifacts, baseline_sched)
-    mssc_o = compute_mssc_objective(artifacts, p_optimal)
+    mssc_o = compute_mssc_objective(artifacts, p_optimal)"""
 
     nho_b = compute_nho_metric(artifacts, baseline_sched)
     nho_o = compute_nho_metric(artifacts, p_optimal)
@@ -512,12 +512,12 @@ def main():
             f"Improvement = {improvement_str:>10}"
         )
 
-    print_row("NN", nn_b, nn_o, ",.2f")
-    print_row("MSSC", mssc_b, mssc_o, ",.2f")
+    """print_row("NN", nn_b, nn_o, ",.2f")
+    print_row("MSSC", mssc_b, mssc_o, ",.2f")"""
     print_row("NHO", nho_b, nho_o, ",.6f")
     print_row("RECT_SIZE", rect_size_b, rect_size_o, ",.6f")
-    print_row("OVERLAP", overlap_b, overlap_o, ",.6f")
-    print_row("RECT_OBJ", rect_b, rect_o, ",.6f")
+    """print_row("OVERLAP", overlap_b, overlap_o, ",.6f")
+    print_row("RECT_OBJ", rect_b, rect_o, ",.6f")"""
     print_row("#RECT_NODE_OVERLAP", rect_overlap_nodes_b, rect_overlap_nodes_o, ",.0f")
     print_row("#HULL_NODE_OVERLAP", hull_overlap_nodes_b, hull_overlap_nodes_o, ",.0f")
 

@@ -15,10 +15,11 @@ from heuristic_alns import alns_improve
 
 #DATA_SET = "1027633"
 #DATA_SET = "1042199"
-DATA_SET = "1004812"
+#DATA_SET = "1004812"
+DATA_SET = "1004940"
 
 W1, W2 = 1.0, 1.0
-RUN_TIME = 60*100
+RUN_TIME = 60*200
 
 def filter_by_frequency_1(
     stops: Dict[int, Stop],
